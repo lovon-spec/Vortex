@@ -8,6 +8,8 @@ DerivedData/
 xcuserdata/
 *.xcworkspace/xcuserdata/
 .DS_Store
+.claude/
+.mcp.json
 *.ipsw
 GuestTools/VortexAudioPlugin/build/
 GuestTools/build/
