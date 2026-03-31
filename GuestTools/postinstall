@@ -1,0 +1,45 @@
+#!/bin/bash
+# postinstall -- Runs after VortexGuestTools.pkg installs files.
+#
+# This script is executed by the macOS Installer as root after placing
+# the payload on disk. It:
+#   1. Restarts coreaudiod so the HAL plugin is loaded.
+#   2. Loads the LaunchDaemon plist so the audio daemon starts.
+#
+# Exit 0 even if individual steps fail -- a reboot will fix things.
+# The installer shows a failure dialog on non-zero exit, which is
+# confusing when the payload was installed correctly.
+
+set -u
+
+PLIST="/Library/LaunchDaemons/com.vortex.audiodaemon.plist"
+DAEMON_LABEL="com.vortex.audiodaemon"
+
+echo "VortexGuestTools postinstall: restarting coreaudiod..."
+
+# Restart coreaudiod so it picks up the new HAL plugin in
+# /Library/Audio/Plug-Ins/HAL/VortexAudioPlugin.driver.
+# launchctl kickstart -kp is the preferred way; fall back to killall.
+if launchctl kickstart -kp system/com.apple.audio.coreaudiod 2>/dev/null; then
+    echo "  coreaudiod restarted via launchctl."
+else
+    killall coreaudiod 2>/dev/null || true
+    echo "  coreaudiod restarted via killall."
+fi
+
+echo "VortexGuestTools postinstall: loading LaunchDaemon..."
+
+# Unload first in case a previous version was loaded.
+launchctl bootout system/"${DAEMON_LABEL}" 2>/dev/null || true
+
+# Load the daemon plist. Use bootstrap for modern launchctl.
+if launchctl bootstrap system "${PLIST}" 2>/dev/null; then
+    echo "  LaunchDaemon loaded via launchctl bootstrap."
+elif launchctl load "${PLIST}" 2>/dev/null; then
+    echo "  LaunchDaemon loaded via launchctl load."
+else
+    echo "  WARNING: Could not load LaunchDaemon. It will start on next boot."
+fi
+
+echo "VortexGuestTools postinstall: done."
+exit 0

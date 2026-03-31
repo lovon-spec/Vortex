@@ -1,0 +1,15 @@
+.build/
+.swiftpm/
+build/
+*.o
+*.dylib
+*.pkg
+DerivedData/
+xcuserdata/
+*.xcworkspace/xcuserdata/
+.DS_Store
+*.ipsw
+GuestTools/VortexAudioPlugin/build/
+GuestTools/build/
+GuestTools/staging/
+/tmp/
