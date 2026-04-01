@@ -486,11 +486,40 @@ VortexAudio_Create(CFAllocatorRef allocator, CFUUIDRef requestedTypeUUID)
     /*
      * Create POSIX shared memory for the ring buffers.
      * The HAL plugin owns the segment (O_CREAT). The daemon opens it later.
-     * We unlink any stale segment first to ensure a clean start.
+     *
+     * If coreaudiod restarts, VortexAudio_Create is called again. Handle
+     * re-creation gracefully:
+     *   1. Try O_CREAT | O_EXCL first (brand new segment).
+     *   2. If EEXIST, the segment already exists from a prior instance.
+     *      Open with O_CREAT (no EXCL), re-map, and reset all positions.
+     *   3. Increment the generation counter so the daemon detects the re-sync.
      */
-    shm_unlink(VORTEX_SHM_NAME); /* ignore failure -- may not exist */
+    uint32_t prevGeneration = 0;
+    bool isRecreation = false;
 
-    int shmFD = shm_open(VORTEX_SHM_NAME, O_CREAT | O_RDWR, 0666);
+    int shmFD = shm_open(VORTEX_SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0666);
+    if (shmFD < 0 && errno == EEXIST) {
+        /* Segment exists from a prior plugin instance. Re-open it. */
+        shmFD = shm_open(VORTEX_SHM_NAME, O_RDWR, 0666);
+        if (shmFD >= 0) {
+            /*
+             * Try to read the previous generation from the existing segment
+             * before we zero it out. Map read-only first to peek at it.
+             */
+            void* peek = mmap(NULL, VORTEX_SHM_SIZE,
+                              PROT_READ, MAP_SHARED, shmFD, 0);
+            if (peek != MAP_FAILED) {
+                VortexSharedAudioState* old = (VortexSharedAudioState*)peek;
+                uint32_t oldMagic = atomic_load_explicit(&old->magic, memory_order_acquire);
+                if (oldMagic == VORTEX_SHM_MAGIC) {
+                    prevGeneration = atomic_load_explicit(&old->generation, memory_order_acquire);
+                }
+                munmap(peek, VORTEX_SHM_SIZE);
+            }
+            isRecreation = true;
+            VLog("VortexAudio_Create: shm segment already exists -- re-creating (prev gen %u)", prevGeneration);
+        }
+    }
     if (shmFD < 0) {
         VLogError("VortexAudio_Create: shm_open failed (errno %d)", errno);
         free(state);
@@ -500,7 +529,7 @@ VortexAudio_Create(CFAllocatorRef allocator, CFUUIDRef requestedTypeUUID)
     if (ftruncate(shmFD, (off_t)VORTEX_SHM_SIZE) != 0) {
         VLogError("VortexAudio_Create: ftruncate failed (errno %d)", errno);
         close(shmFD);
-        shm_unlink(VORTEX_SHM_NAME);
+        if (!isRecreation) shm_unlink(VORTEX_SHM_NAME);
         free(state);
         return NULL;
     }
@@ -510,12 +539,13 @@ VortexAudio_Create(CFAllocatorRef allocator, CFUUIDRef requestedTypeUUID)
     if (mapped == MAP_FAILED) {
         VLogError("VortexAudio_Create: mmap failed (errno %d)", errno);
         close(shmFD);
-        shm_unlink(VORTEX_SHM_NAME);
+        if (!isRecreation) shm_unlink(VORTEX_SHM_NAME);
         free(state);
         return NULL;
     }
 
-    /* Zero the entire region and initialize the header. */
+    /* Zero the entire region and initialize the header.
+     * On re-creation this resets all ring positions to 0. */
     memset(mapped, 0, VORTEX_SHM_SIZE);
 
     VortexSharedAudioState* shared = (VortexSharedAudioState*)mapped;
@@ -524,6 +554,9 @@ VortexAudio_Create(CFAllocatorRef allocator, CFUUIDRef requestedTypeUUID)
     atomic_store_explicit(&shared->sampleRate, (uint32_t)state->sampleRate, memory_order_release);
     atomic_store_explicit(&shared->channels, kVortexNumChannels, memory_order_release);
     atomic_store_explicit(&shared->isActive, 0, memory_order_release);
+
+    /* Increment generation so the daemon detects the re-creation and re-syncs. */
+    atomic_store_explicit(&shared->generation, prevGeneration + 1, memory_order_release);
 
     state->sharedState = shared;
     state->shmFD = shmFD;
@@ -539,8 +572,9 @@ VortexAudio_Create(CFAllocatorRef allocator, CFUUIDRef requestedTypeUUID)
                               &shared->inputWritePos,
                               &shared->inputReadPos);
 
-    VLog("VortexAudio_Create: shared memory '%s' created (%zu bytes)",
-         VORTEX_SHM_NAME, (size_t)VORTEX_SHM_SIZE);
+    VLog("VortexAudio_Create: shared memory '%s' %s (gen %u, %zu bytes)",
+         VORTEX_SHM_NAME, isRecreation ? "re-created" : "created",
+         prevGeneration + 1, (size_t)VORTEX_SHM_SIZE);
 
     sDriver = state;
 

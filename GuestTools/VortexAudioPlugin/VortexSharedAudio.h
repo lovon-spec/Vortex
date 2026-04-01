@@ -67,7 +67,7 @@ extern "C" {
  * The daemon checks this before using the buffers.
  */
 #define VORTEX_SHM_MAGIC    0x56585348  /* "VXSH" in little-endian */
-#define VORTEX_SHM_VERSION  1
+#define VORTEX_SHM_VERSION  2
 
 /*
  * VortexSharedAudioState -- the layout of the shared memory region.
@@ -87,7 +87,7 @@ typedef struct {
     _Atomic uint32_t    sampleRate;     /* e.g. 48000 */
     _Atomic uint32_t    channels;       /* e.g. 2 */
     _Atomic uint32_t    isActive;       /* 1 when IO is running, 0 when stopped */
-    uint32_t            _reserved0;     /* alignment padding */
+    _Atomic uint32_t    generation;     /* incremented on each shm re-creation */
 
     /* ---- Output ring: plugin WRITES, daemon READS ---- */
     /* Positions are in samples (frames * channels). */

@@ -31,6 +31,17 @@ STAGING_DIR="${BUILD_DIR}/staging"
 SCRIPTS_DIR="${BUILD_DIR}/scripts"
 PKG_PATH="${BUILD_DIR}/VortexGuestTools.pkg"
 
+# -- Helpers --
+
+log() {
+    echo "==> $1"
+}
+
+die() {
+    echo "ERROR: $1" >&2
+    exit 1
+}
+
 # -- Version resolution --
 # Read from the VERSION file. Fall back to git describe if available,
 # then to "0.0.0-unknown".
@@ -45,17 +56,6 @@ else
     PKG_VERSION="0.0.0-unknown"
     log "WARNING: No VERSION file and no git -- using fallback version: ${PKG_VERSION}"
 fi
-
-# -- Helpers --
-
-log() {
-    echo "==> $1"
-}
-
-die() {
-    echo "ERROR: $1" >&2
-    exit 1
-}
 
 # -- Step 1: Build the HAL plugin --
 
