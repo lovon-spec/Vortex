@@ -14,7 +14,7 @@ fi
 swift build --target "$TARGET" 2>&1 | tail -3
 
 # Find the binary — path differs between toolchains
-BIN=$(find .build -name "$TARGET" -type f -perm +111 ! -path "*.build/*" 2>/dev/null | head -1)
+BIN=$(find .build -name "$TARGET" -type f ! -path "*.build/*" ! -path "*.dSYM/*" ! -name "*.o" ! -name "*.d" 2>/dev/null | while read f; do test -x "$f" && echo "$f"; done | head -1)
 if [ -z "$BIN" ]; then
     echo "error: $TARGET binary not found after build"
     exit 1
