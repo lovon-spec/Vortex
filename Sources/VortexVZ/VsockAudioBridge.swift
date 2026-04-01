@@ -13,13 +13,25 @@
 //   [N bytes: payload]
 //
 // Message types:
-//   0x01 CONFIGURE      guest -> host: audio format info
-//   0x02 PCM_OUTPUT     guest -> host: playback PCM data
-//   0x03 PCM_INPUT      host -> guest: capture PCM data
-//   0x04 START          guest -> host: IO started
-//   0x05 STOP           guest -> host: IO stopped
-//   0x06 LATENCY_QUERY  guest -> host: round-trip latency query
-//   0x07 LATENCY_REPLY  host -> guest: latency response
+//   0x01 CONFIGURE         guest -> host: audio format info (13 or 17 bytes)
+//   0x02 PCM_OUTPUT        guest -> host: playback PCM data
+//   0x03 PCM_INPUT         host -> guest: capture PCM data
+//   0x04 START             guest -> host: IO started
+//   0x05 STOP              guest -> host: IO stopped
+//   0x06 LATENCY_QUERY     guest -> host: round-trip latency query
+//   0x07 LATENCY_REPLY     host -> guest: latency response
+//   0x08 VERSION_MISMATCH  host -> guest: protocol version rejected
+//
+// CONFIGURE payload layout:
+//   [4 bytes: sampleRate (UInt32 LE)]
+//   [4 bytes: channels (UInt32 LE)]
+//   [4 bytes: bitsPerSample (UInt32 LE)]
+//   [1 byte:  isFloat (0 or 1)]
+//   -- end of v0 format (13 bytes) --
+//   [4 bytes: protocolVersion (UInt32 LE)]  (added in v1, 17 bytes total)
+//
+// VERSION_MISMATCH payload:
+//   [4 bytes: host protocolVersion (UInt32 LE)]
 
 import Darwin
 import Foundation
@@ -32,13 +44,14 @@ import VortexCore
 
 /// Message types exchanged over the vsock audio channel.
 public enum VsockAudioMessageType: UInt32, Sendable {
-    case configure    = 0x01
-    case pcmOutput    = 0x02
-    case pcmInput     = 0x03
-    case start        = 0x04
-    case stop         = 0x05
-    case latencyQuery = 0x06
-    case latencyReply = 0x07
+    case configure       = 0x01
+    case pcmOutput       = 0x02
+    case pcmInput        = 0x03
+    case start           = 0x04
+    case stop            = 0x05
+    case latencyQuery    = 0x06
+    case latencyReply    = 0x07
+    case versionMismatch = 0x08
 }
 
 // MARK: - VsockAudioFormat
@@ -47,6 +60,13 @@ public enum VsockAudioMessageType: UInt32, Sendable {
 ///
 /// Sent by the guest daemon at connection time to tell the host what
 /// PCM format it will produce/consume.
+///
+/// Wire layout:
+/// - Bytes 0-12: base format (sampleRate, channels, bitsPerSample, isFloat) = 13 bytes
+/// - Bytes 13-16: protocol version (UInt32 LE, added in v1) = 4 bytes
+///
+/// A 13-byte payload indicates a v0 daemon (no version field). A 17-byte
+/// payload includes the protocol version.
 public struct VsockAudioFormat: Sendable, Equatable {
     /// Sample rate in Hz (e.g. 44100, 48000).
     public var sampleRate: UInt32
@@ -60,8 +80,12 @@ public struct VsockAudioFormat: Sendable, Equatable {
     /// Whether samples are IEEE 754 floating-point (true) or signed integer (false).
     public var isFloat: Bool
 
-    /// Size of the serialized wire representation in bytes.
+    /// Size of the base wire representation in bytes (without version).
+    /// Old daemons send exactly this many bytes.
     public static let wireSize: Int = 13 // 4 + 4 + 4 + 1
+
+    /// Size of the extended wire representation including the protocol version.
+    public static let wireSizeV1: Int = 17 // 13 + 4
 
     public init(
         sampleRate: UInt32 = 48000,
@@ -83,6 +107,9 @@ public struct VsockAudioFormat: Sendable, Equatable {
     // MARK: - Wire serialization
 
     /// Serializes the format to a Data blob for the CONFIGURE message payload.
+    ///
+    /// Produces the base 13-byte format without version. Use
+    /// ``serializeWithVersion(_:)`` for the v1 extended format.
     public func serialize() -> Data {
         var data = Data(capacity: Self.wireSize)
         var sr = sampleRate.littleEndian
@@ -98,7 +125,20 @@ public struct VsockAudioFormat: Sendable, Equatable {
         return data
     }
 
+    /// Serializes the format with an appended protocol version (17 bytes total).
+    ///
+    /// - Parameter version: The protocol version to append.
+    /// - Returns: A 17-byte Data blob suitable for a v1+ CONFIGURE payload.
+    public func serializeWithVersion(_ version: UInt32) -> Data {
+        var data = serialize()
+        var ver = version.littleEndian
+        withUnsafeBytes(of: &ver) { data.append(contentsOf: $0) }
+        return data
+    }
+
     /// Deserializes a format from a CONFIGURE message payload.
+    ///
+    /// Accepts both the 13-byte (v0) and 17-byte (v1+) formats.
     ///
     /// - Parameter data: The payload data (must be at least `wireSize` bytes).
     /// - Returns: The parsed format, or `nil` if the data is too short.
@@ -122,6 +162,19 @@ public struct VsockAudioFormat: Sendable, Equatable {
             bitsPerSample: UInt32(littleEndian: bps),
             isFloat: fl != 0
         )
+    }
+
+    /// Extracts the protocol version from a CONFIGURE payload, if present.
+    ///
+    /// - Parameter data: The CONFIGURE payload.
+    /// - Returns: The protocol version, or `nil` if the payload is the old
+    ///   13-byte format without a version field.
+    public static func extractProtocolVersion(from data: Data) -> UInt32? {
+        guard data.count >= wireSizeV1 else { return nil }
+        let raw = data.withUnsafeBytes { buf -> UInt32 in
+            buf.loadUnaligned(fromByteOffset: 13, as: UInt32.self)
+        }
+        return UInt32(littleEndian: raw)
     }
 }
 
@@ -152,6 +205,17 @@ public final class VsockAudioBridge: @unchecked Sendable {
     /// Well-known vsock port for Vortex audio transport.
     public static let audioPort: UInt32 = 5198
 
+    /// Protocol version for the vsock audio wire protocol.
+    ///
+    /// Version history:
+    /// - 0: implicit (old daemons that do not send a version field)
+    /// - 1: first versioned protocol; adds version field to CONFIGURE
+    ///
+    /// Compatibility policy: the host accepts connections from daemons whose
+    /// major version matches. Version 0 (legacy) is accepted with a warning.
+    /// A mismatch causes the host to send VERSION_MISMATCH and close.
+    public static let protocolVersion: UInt32 = 1
+
     /// Size of the message header: type (4 bytes) + length (4 bytes).
     private static let headerSize = 8
 
@@ -180,15 +244,15 @@ public final class VsockAudioBridge: @unchecked Sendable {
     public private(set) var isStreaming: Bool = false
 
     /// Set when a host audio device disconnects. Cleared on reconnect.
-    /// Exposed so the VM manager UI can show a warning.
     public private(set) var deviceDisconnected: Bool = false
 
-    /// Callback invoked on device state changes. Called on an arbitrary
-    /// thread. Parameters: isDisconnected (true=lost, false=recovered),
-    /// direction, device UID.
+    /// Callback invoked on device state changes.
     public var onDeviceStateChanged: ((_ disconnected: Bool,
                                        _ direction: AudioDirection,
                                        _ uid: String) -> Void)?
+
+    /// Protocol version reported by the connected guest daemon.
+    public private(set) var peerProtocolVersion: UInt32?
 
     /// The active vsock connection from the guest.
     private var connection: VZVirtioSocketConnection?
@@ -386,6 +450,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
         socketDevice = nil
         audioConfig = nil
         negotiatedFormat = nil
+        peerProtocolVersion = nil
         isAttached = false
     }
 
@@ -525,7 +590,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
                 handleStop()
             case .latencyQuery:
                 handleLatencyQuery()
-            case .pcmInput, .latencyReply:
+            case .pcmInput, .latencyReply, .versionMismatch:
                 // These are host -> guest messages; ignore if received.
                 break
             }
@@ -570,12 +635,82 @@ public final class VsockAudioBridge: @unchecked Sendable {
 
     // MARK: - Message Handlers
 
-    /// Handles the CONFIGURE message: sets up the AudioRouter with the
-    /// negotiated format.
+    /// Sends a VERSION_MISMATCH message to the guest with the host's protocol
+    /// version, then closes the connection.
+    ///
+    /// - Parameter fd: The file descriptor of the guest connection.
+    private func sendVersionMismatchAndClose(fd: Int32) {
+        var payload = Data(capacity: 4)
+        var ver = Self.protocolVersion.littleEndian
+        withUnsafeBytes(of: &ver) { payload.append(contentsOf: $0) }
+        sendMessage(type: .versionMismatch, payload: payload)
+
+        // Give the guest a moment to read the response before closing.
+        // This is a deliberate short delay to flush the write buffer.
+        usleep(50_000) // 50ms
+        Darwin.close(fd)
+
+        if tcpClientFD == fd {
+            tcpClientFD = -1
+        }
+        if let conn = connection, conn.fileDescriptor == fd {
+            connection = nil
+        }
+    }
+
+    /// Handles the CONFIGURE message: validates the protocol version, then
+    /// sets up the AudioRouter with the negotiated format.
+    ///
+    /// Version handling:
+    /// - 13-byte payload (no version field): legacy v0 daemon, accepted with warning.
+    /// - 17-byte payload with matching version: normal operation.
+    /// - 17-byte payload with mismatched major version: rejected.
     private func handleConfigure(payload: Data) {
         guard let format = VsockAudioFormat.deserialize(from: payload) else {
             return
         }
+
+        // Extract and validate the protocol version.
+        let peerVersion: UInt32
+        if let v = VsockAudioFormat.extractProtocolVersion(from: payload) {
+            peerVersion = v
+        } else {
+            // Legacy daemon: 13-byte CONFIGURE without version field.
+            peerVersion = 0
+            print("[audio-tcp] WARNING: Guest daemon sent 13-byte CONFIGURE without "
+                  + "protocol version. Assuming legacy v0 daemon. "
+                  + "Update guest tools for full compatibility.")
+        }
+
+        self.peerProtocolVersion = peerVersion
+
+        // Version compatibility check: reject if the peer's major version
+        // does not match ours and is not the legacy v0.
+        if peerVersion != 0 && peerVersion != Self.protocolVersion {
+            print("[audio-tcp] ERROR: Protocol version mismatch — "
+                  + "host=\(Self.protocolVersion), guest=\(peerVersion). "
+                  + "Rejecting connection.")
+
+            // Determine which fd to close.
+            let fd: Int32
+            if tcpClientFD >= 0 {
+                fd = tcpClientFD
+            } else if let conn = connection {
+                fd = conn.fileDescriptor
+            } else {
+                return
+            }
+
+            sendVersionMismatchAndClose(fd: fd)
+            return
+        }
+
+        if peerVersion == 0 {
+            print("[audio-tcp] Accepted legacy v0 daemon connection")
+        } else {
+            print("[audio-tcp] Protocol version \(peerVersion) accepted")
+        }
+
         self.negotiatedFormat = format
 
         // Set up the AudioRouter with the negotiated parameters.
@@ -753,6 +888,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
         }
 
         negotiatedFormat = nil
+        peerProtocolVersion = nil
     }
 
     // MARK: - Device Hot-Swap

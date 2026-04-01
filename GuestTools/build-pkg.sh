@@ -26,11 +26,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 PKG_ID="com.vortex.guest-tools"
-PKG_VERSION="1.0"
 BUILD_DIR="${SCRIPT_DIR}/build"
 STAGING_DIR="${BUILD_DIR}/staging"
 SCRIPTS_DIR="${BUILD_DIR}/scripts"
 PKG_PATH="${BUILD_DIR}/VortexGuestTools.pkg"
+
+# -- Version resolution --
+# Read from the VERSION file. Fall back to git describe if available,
+# then to "0.0.0-unknown".
+VERSION_FILE="${SCRIPT_DIR}/VERSION"
+if [[ -f "${VERSION_FILE}" ]]; then
+    PKG_VERSION="$(tr -d '[:space:]' < "${VERSION_FILE}")"
+    log "Version from VERSION file: ${PKG_VERSION}"
+elif command -v git &>/dev/null && git rev-parse --git-dir &>/dev/null; then
+    PKG_VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo "0.0.0-unknown")"
+    log "Version from git describe: ${PKG_VERSION}"
+else
+    PKG_VERSION="0.0.0-unknown"
+    log "WARNING: No VERSION file and no git -- using fallback version: ${PKG_VERSION}"
+fi
 
 # -- Helpers --
 
@@ -90,10 +104,16 @@ cp "${SCRIPT_DIR}/VortexAudioDaemon/com.vortex.audiodaemon.plist" \
    "${STAGING_DIR}/Library/LaunchDaemons/com.vortex.audiodaemon.plist"
 chmod 644 "${STAGING_DIR}/Library/LaunchDaemons/com.vortex.audiodaemon.plist"
 
+# Embed the version file so the installed guest tools are self-describing.
+mkdir -p "${STAGING_DIR}/usr/local/share/vortex"
+echo "${PKG_VERSION}" > "${STAGING_DIR}/usr/local/share/vortex/VERSION"
+chmod 644 "${STAGING_DIR}/usr/local/share/vortex/VERSION"
+
 log "  Staging layout:"
 log "    Library/Audio/Plug-Ins/HAL/VortexAudioPlugin.driver/"
 log "    usr/local/bin/VortexAudioDaemon"
 log "    Library/LaunchDaemons/com.vortex.audiodaemon.plist"
+log "    usr/local/share/vortex/VERSION (${PKG_VERSION})"
 
 # -- Step 4: Prepare postinstall script --
 

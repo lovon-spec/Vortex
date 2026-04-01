@@ -46,6 +46,9 @@ private let VORTEX_AUDIO_PORT: UInt16 = 5198
 /// The guest can override this with --host flag.
 private var hostAddress: String = "192.168.64.1"
 
+/// Path to the installed guest tools VERSION file.
+private let GUEST_TOOLS_VERSION_PATH = "/usr/local/share/vortex/VERSION"
+
 /// How long to wait between reconnection attempts (seconds).
 private let RECONNECT_DELAY: TimeInterval = 2.0
 
@@ -87,17 +90,26 @@ private let SHM_ATTACH_TIMEOUT: TimeInterval = 30.0
 /// Polling interval when waiting for the shm segment to appear.
 private let SHM_ATTACH_POLL_INTERVAL: useconds_t = 500_000  // 0.5s
 
+// MARK: - Protocol Version
+
+/// Protocol version for the vsock audio wire protocol.
+///
+/// Must match `VsockAudioBridge.protocolVersion` on the host side.
+/// Version 0 is implicit (old daemons that do not include a version field).
+private let PROTOCOL_VERSION: UInt32 = 1
+
 // MARK: - Message Types
 
 /// Mirror of VsockAudioMessageType from the host side.
 private enum MessageType: UInt32 {
-    case configure    = 0x01
-    case pcmOutput    = 0x02
-    case pcmInput     = 0x03
-    case start        = 0x04
-    case stop         = 0x05
-    case latencyQuery = 0x06
-    case latencyReply = 0x07
+    case configure       = 0x01
+    case pcmOutput       = 0x02
+    case pcmInput        = 0x03
+    case start           = 0x04
+    case stop            = 0x05
+    case latencyQuery    = 0x06
+    case latencyReply    = 0x07
+    case versionMismatch = 0x08
 }
 
 // MARK: - VortexAudioDaemon
@@ -229,9 +241,11 @@ final class VortexAudioDaemon {
         }
         signal(SIGINT) { _ in }
 
+        let guestToolsVersion = readGuestToolsVersion()
         log("VortexAudioDaemon starting (format: \(format.sampleRate)Hz, "
             + "\(format.channels)ch, \(format.bitsPerSample)bit, "
-            + "float=\(format.isFloat))")
+            + "float=\(format.isFloat), protocol=v\(PROTOCOL_VERSION), "
+            + "tools=\(guestToolsVersion))")
 
         // Attach to the HAL plugin's shared memory. This blocks until the
         // plugin creates the segment or the timeout expires.
@@ -406,6 +420,9 @@ final class VortexAudioDaemon {
             handlePCMInput(payload: payload)
         case .latencyReply:
             handleLatencyReply(payload: payload)
+        case .versionMismatch:
+            handleVersionMismatch(payload: payload)
+            return false // Host is closing the connection.
         default:
             break // Ignore unknown or irrelevant messages.
         }
@@ -415,21 +432,30 @@ final class VortexAudioDaemon {
 
     // MARK: - Message Sending
 
-    /// Sends the CONFIGURE message with our audio format.
+    /// Sends the CONFIGURE message with our audio format and protocol version.
+    ///
+    /// The v1 payload is 17 bytes: 13 bytes of audio format + 4 bytes of
+    /// protocol version (UInt32 LE). Old hosts that only understand 13-byte
+    /// payloads will simply ignore the extra 4 bytes when deserializing.
     private func sendConfigure() {
         var payload = [UInt8]()
-        payload.reserveCapacity(13)
+        payload.reserveCapacity(17)
 
         var sr = format.sampleRate.littleEndian
         var ch = format.channels.littleEndian
         var bps = format.bitsPerSample.littleEndian
         let fl: UInt8 = format.isFloat ? 1 : 0
+        var ver = PROTOCOL_VERSION.littleEndian
 
         withUnsafeBytes(of: &sr) { payload.append(contentsOf: $0) }
         withUnsafeBytes(of: &ch) { payload.append(contentsOf: $0) }
         withUnsafeBytes(of: &bps) { payload.append(contentsOf: $0) }
         payload.append(fl)
+        withUnsafeBytes(of: &ver) { payload.append(contentsOf: $0) }
 
+        log("Sending CONFIGURE: \(format.sampleRate)Hz, \(format.channels)ch, "
+            + "\(format.bitsPerSample)bit, float=\(format.isFloat), "
+            + "protocol=v\(PROTOCOL_VERSION)")
         sendMessage(type: .configure, payload: payload)
     }
 
@@ -571,6 +597,30 @@ final class VortexAudioDaemon {
         let latencyMs = Double(bufferFrames) / Double(format.sampleRate) * 1000.0
         logVerbose("Host reports buffer latency: \(bufferFrames) frames "
             + "(~\(String(format: "%.1f", latencyMs))ms)")
+    }
+
+    /// Handles VERSION_MISMATCH from the host: logs the error and exits.
+    ///
+    /// The host sends this when our protocol version is incompatible.
+    /// The payload contains the host's protocol version (4 bytes, UInt32 LE).
+    private func handleVersionMismatch(payload: [UInt8]) {
+        var hostVersion: UInt32 = 0
+        if payload.count >= 4 {
+            hostVersion = payload.withUnsafeBytes { buf -> UInt32 in
+                UInt32(littleEndian: buf.loadUnaligned(fromByteOffset: 0, as: UInt32.self))
+            }
+        }
+
+        log("FATAL: Protocol version mismatch — "
+            + "daemon=v\(PROTOCOL_VERSION), host=v\(hostVersion). "
+            + "The guest tools version is incompatible with the host Vortex version. "
+            + "Please update the guest tools package to match the host.")
+
+        // Exit with a distinct code so the LaunchDaemon plist can decide
+        // whether to restart or back off.
+        shouldRun = false
+        disconnect()
+        exit(78) // EX_CONFIG from sysexits.h
     }
 
     // MARK: - Shared Memory
@@ -767,7 +817,7 @@ final class VortexAudioDaemon {
         }
     }
 
-    // MARK: - Logging
+    // MARK: - Logging & Utilities
 
     /// Logs a lifecycle message (always printed).
     private func log(_ message: String) {
@@ -783,6 +833,19 @@ final class VortexAudioDaemon {
 
     private func errnoString() -> String {
         String(cString: strerror(errno))
+    }
+
+    /// Reads the installed guest tools version from the VERSION file.
+    ///
+    /// - Returns: The version string, or "unknown" if the file is missing.
+    private func readGuestToolsVersion() -> String {
+        guard let data = FileManager.default.contents(atPath: GUEST_TOOLS_VERSION_PATH),
+              let version = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !version.isEmpty else {
+            return "unknown"
+        }
+        return version
     }
 }
 
