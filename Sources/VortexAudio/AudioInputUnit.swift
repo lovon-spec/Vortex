@@ -1,16 +1,16 @@
-// AudioInputUnit.swift — Per-VM audio input capture via CoreAudio device IOProc.
+// AudioInputUnit.swift — Per-VM audio input capture via AudioQueue.
 // VortexAudio
 //
-// Uses the low-level CoreAudio device IOProc API (AudioDeviceCreateIOProcID /
-// AudioDeviceStart / AudioDeviceStop) to capture audio from a specific host
-// input device. This replaces the previous AUHAL-based approach which failed
-// with error -10863 (kAudioUnitErr_CannotDoInCurrentContext) on every
-// AudioUnitRender call.
+// Uses AudioQueue Services for audio input capture from a specific host device.
+// This replaces two prior approaches that failed:
+//   1. AUHAL AudioUnit: AudioUnitRender returned -10863
+//      (kAudioUnitErr_CannotDoInCurrentContext) on every call.
+//   2. AudioDeviceCreateIOProcID: Captured only silence from BlackHole loopback
+//      devices — the IOProc never received loopback audio.
 //
-// The IOProc callback receives captured audio directly in its `inputData`
-// parameter — no rendering step needed. The captured PCM is converted to
-// interleaved Float32 if necessary and written into an AudioRingBuffer that
-// the device emulation layer reads from.
+// AudioQueue is a higher-level API that handles format negotiation and sample
+// rate conversion automatically. It uses device UID (CFString) for device
+// selection rather than AudioDeviceID.
 
 import AudioToolbox
 import CoreAudio
@@ -19,25 +19,39 @@ import Foundation
 // MARK: - AudioInputUnit
 
 /// Manages audio input (capture) from a specific host CoreAudio device using
-/// the device IOProc API. Each VM gets its own `AudioInputUnit` pointed at
+/// AudioQueue Services. Each VM gets its own `AudioInputUnit` pointed at
 /// whichever microphone or virtual input the user has configured.
 ///
-/// The IOProc callback pushes captured interleaved Float32 PCM into the
-/// attached `AudioRingBuffer`. If the ring buffer overflows, the oldest
+/// The AudioQueue input callback pushes captured interleaved Float32 PCM into
+/// the attached `AudioRingBuffer`. If the ring buffer overflows, the oldest
 /// samples that have not been consumed are effectively lost as new data
 /// overwrites the write frontier (the callback drops frames it cannot write).
 ///
 /// ## Threading
 /// - `init`, `start`, `stop`, `switchDevice`, `reconfigure` must be called
 ///   from the main thread or a serial queue.
-/// - The IOProc callback runs on the CoreAudio real-time thread. It performs
-///   only memcpy and atomic operations — no allocations, locks, or syscalls.
+/// - The AudioQueue input callback runs on an internal AudioQueue thread. It
+///   performs only memcpy and atomic operations — no allocations, locks, or
+///   syscalls.
 public final class AudioInputUnit: @unchecked Sendable {
+
+    // MARK: - Constants
+
+    /// Number of AudioQueue buffers to allocate (standard triple-buffering).
+    private static let bufferCount = 3
+
+    /// Duration of each AudioQueue buffer in seconds. This controls the
+    /// callback frequency — shorter buffers mean lower latency but more CPU.
+    private static let bufferDurationSeconds: Double = 0.01  // 10ms
 
     // MARK: - Properties
 
     /// The CoreAudio device ID this unit captures from.
     public private(set) var deviceID: AudioDeviceID
+
+    /// The device UID string. AudioQueue uses this (not AudioDeviceID) for
+    /// device selection via `kAudioQueueProperty_CurrentDevice`.
+    private var deviceUID: String
 
     /// The ring buffer that captured audio is written into.
     /// The device emulation layer reads from this buffer.
@@ -52,27 +66,11 @@ public final class AudioInputUnit: @unchecked Sendable {
     /// Callback invocation counter for diagnostics.
     var callbackCount: UInt64 = 0
 
-    /// The registered IOProc ID, or `nil` if not registered.
-    fileprivate var ioProcID: AudioDeviceIOProcID?
+    /// The AudioQueue instance, or `nil` if not set up.
+    private var audioQueue: AudioQueueRef?
 
-    /// The device's native input stream format. Queried at setup time and
-    /// used to interpret the raw data delivered by the IOProc callback.
-    fileprivate var deviceNativeFormat: AudioStreamBasicDescription?
-
-    /// Pre-allocated scratch buffer for format conversion. Sized for the
-    /// maximum expected callback (4096 frames * channels * sizeof(Float)).
-    /// Only used when the device's native format differs from our target
-    /// Float32 interleaved format.
-    fileprivate var conversionBuffer: UnsafeMutablePointer<Float>?
-    fileprivate var conversionBufferFrameCapacity: Int = 0
-
-    /// Whether the device's native format requires conversion to our
-    /// target format. Determined at setup time.
-    fileprivate var needsConversion: Bool = false
-
-    /// Number of channels in the device's native format (may differ from
-    /// our target channel count).
-    fileprivate var nativeChannels: UInt32 = 0
+    /// Pre-allocated AudioQueue buffers for triple-buffering.
+    private var audioQueueBuffers: [AudioQueueBufferRef?] = []
 
     // MARK: - Init
 
@@ -93,6 +91,9 @@ public final class AudioInputUnit: @unchecked Sendable {
     ) throws {
         self.deviceID = deviceID
 
+        // Resolve AudioDeviceID to device UID string.
+        self.deviceUID = try AudioInputUnit.resolveDeviceUID(deviceID: deviceID)
+
         let frames = bufferFrames ?? Int(sampleRate / 10) // ~100ms default
         self.ringBuffer = AudioRingBuffer(frameCapacity: frames,
                                           channelCount: Int(channels))
@@ -103,36 +104,33 @@ public final class AudioInputUnit: @unchecked Sendable {
             bitDepth: bitDepth
         )
 
-        try setupIOProc()
+        try setupAudioQueue()
     }
 
     deinit {
         stop()
-        teardownIOProc()
-        if let buf = conversionBuffer {
-            buf.deallocate()
-        }
+        teardownAudioQueue()
     }
 
     // MARK: - Lifecycle
 
     /// Start capturing audio from the input device.
     public func start() throws {
-        guard !isRunning, let procID = ioProcID else { return }
+        guard !isRunning, audioQueue != nil else { return }
 
-        let status = AudioDeviceStart(deviceID, procID)
+        let status = AudioQueueStart(audioQueue!, nil)
         guard status == noErr else {
             throw AudioDeviceError.audioUnitError(status,
-                "AudioDeviceStart for input device \(deviceID)")
+                "AudioQueueStart for input device \(deviceID) (\(deviceUID))")
         }
         isRunning = true
-        print("[AudioInputUnit] Started capture on device \(deviceID)")
+        print("[AudioInputUnit] Started capture on device \(deviceID) (UID: \(deviceUID))")
     }
 
     /// Stop capturing audio.
     public func stop() {
-        guard isRunning, let procID = ioProcID else { return }
-        AudioDeviceStop(deviceID, procID)
+        guard isRunning, let queue = audioQueue else { return }
+        AudioQueueStop(queue, true) // synchronous stop
         isRunning = false
         print("[AudioInputUnit] Stopped capture on device \(deviceID)")
     }
@@ -145,10 +143,11 @@ public final class AudioInputUnit: @unchecked Sendable {
     public func switchDevice(to newDeviceID: AudioDeviceID, restart: Bool = true) throws {
         let wasRunning = isRunning
         stop()
-        teardownIOProc()
+        teardownAudioQueue()
 
         self.deviceID = newDeviceID
-        try setupIOProc()
+        self.deviceUID = try AudioInputUnit.resolveDeviceUID(deviceID: newDeviceID)
+        try setupAudioQueue()
 
         if wasRunning && restart {
             try start()
@@ -163,7 +162,7 @@ public final class AudioInputUnit: @unchecked Sendable {
     ) throws {
         let wasRunning = isRunning
         stop()
-        teardownIOProc()
+        teardownAudioQueue()
 
         self.streamFormat = AudioOutputUnit.makeStreamFormat(
             sampleRate: sampleRate,
@@ -171,284 +170,220 @@ public final class AudioInputUnit: @unchecked Sendable {
             bitDepth: bitDepth
         )
 
-        try setupIOProc()
+        try setupAudioQueue()
 
         if wasRunning {
             try start()
         }
     }
 
-    // MARK: - Private: setup / teardown
+    // MARK: - Private: Device UID Resolution
 
-    /// Query the device's native input format, register the IOProc, and
-    /// allocate any conversion buffers needed.
-    private func setupIOProc() throws {
-        // 0. Set the device's sample rate to match our target format.
-        //    This is critical for loopback devices like BlackHole where
-        //    input and output must agree on the sample rate.
-        var targetRate = streamFormat.mSampleRate
-        var rateAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyNominalSampleRate,
+    /// Resolve an `AudioDeviceID` to its UID string.
+    ///
+    /// AudioQueue uses device UID (a `CFString`) for device selection via
+    /// `kAudioQueueProperty_CurrentDevice`, not `AudioDeviceID`.
+    private static func resolveDeviceUID(deviceID: AudioDeviceID) throws -> String {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        let rateStatus = AudioObjectSetPropertyData(
-            deviceID, &rateAddress, 0, nil,
-            UInt32(MemoryLayout<Float64>.size), &targetRate
-        )
-        if rateStatus == noErr {
-            print("[AudioInputUnit] Set device \(deviceID) sample rate to \(targetRate) Hz")
-        } else {
-            print("[AudioInputUnit] Warning: could not set sample rate: \(rateStatus)")
-        }
 
-        // 1. Query the device's native stream format on the input scope.
-        var nativeFormat = AudioStreamBasicDescription()
-        var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        var formatAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreamFormat,
-            mScope: kAudioDevicePropertyScopeInput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        var status = AudioObjectGetPropertyData(
+        var uid: Unmanaged<CFString>?
+        var dataSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        let status = AudioObjectGetPropertyData(
             deviceID,
-            &formatAddress,
-            0, nil,
-            &formatSize,
-            &nativeFormat
+            &address,
+            0,
+            nil,
+            &dataSize,
+            &uid
         )
-        guard status == noErr else {
-            throw AudioDeviceError.audioUnitError(status,
-                "Query native input format for device \(deviceID)")
+        guard status == noErr, let cfString = uid else {
+            throw AudioDeviceError.coreAudioError(status,
+                "Failed to resolve UID for AudioDeviceID \(deviceID)")
         }
+        return cfString.takeRetainedValue() as String
+    }
 
-        self.deviceNativeFormat = nativeFormat
-        self.nativeChannels = nativeFormat.mChannelsPerFrame
+    // MARK: - Private: Setup / Teardown
 
-        print("[AudioInputUnit] Device \(deviceID) native input format: " +
-              "\(AudioFormatConverter.formatDescription(nativeFormat))")
-        print("[AudioInputUnit] Target format: " +
-              "\(AudioFormatConverter.formatDescription(streamFormat))")
-
-        // 2. Determine if format conversion is needed.
-        //    We need conversion if:
-        //    - The native format is not Float32
-        //    - The channel count differs
-        //    - The sample rate differs (we handle channel/format mismatch in
-        //      the IOProc; sample rate mismatch would need a proper converter
-        //      but most devices will match our requested rate)
-        let nativeIsFloat32 = (nativeFormat.mFormatFlags & kAudioFormatFlagIsFloat) != 0
-            && nativeFormat.mBitsPerChannel == 32
-        let channelMatch = nativeFormat.mChannelsPerFrame == streamFormat.mChannelsPerFrame
-
-        needsConversion = !nativeIsFloat32 || !channelMatch
-        if needsConversion {
-            print("[AudioInputUnit] Format conversion enabled " +
-                  "(nativeFloat32=\(nativeIsFloat32), channelMatch=\(channelMatch))")
-        }
-
-        // 3. Allocate conversion scratch buffer.
-        //    Sized for 4096 frames * target channels — enough for any
-        //    reasonable callback size.
-        let maxFrames = 4096
-        let targetChannels = Int(streamFormat.mChannelsPerFrame)
-        conversionBufferFrameCapacity = maxFrames
-        if let old = conversionBuffer { old.deallocate() }
-        conversionBuffer = .allocate(capacity: maxFrames * targetChannels)
-
-        // 4. Register the IOProc with the device.
+    /// Create the AudioQueue, set the target device, allocate buffers, and
+    /// enqueue them so the queue is ready to start.
+    private func setupAudioQueue() throws {
+        // 1. Create input AudioQueue with our target format.
+        //    The callback receives captured PCM in the requested format —
+        //    AudioQueue handles any necessary sample rate / format conversion.
         let refCon = Unmanaged.passUnretained(self).toOpaque()
-        var procID: AudioDeviceIOProcID?
+        var queue: AudioQueueRef?
 
-        status = AudioDeviceCreateIOProcID(
-            deviceID,
-            inputIOProc,
+        var format = streamFormat
+        let status = AudioQueueNewInput(
+            &format,
+            audioQueueInputCallback,
             refCon,
-            &procID
+            nil,    // run loop — nil uses internal thread
+            nil,    // run loop mode
+            0,      // flags (reserved)
+            &queue
         )
-        guard status == noErr, procID != nil else {
+        guard status == noErr, let createdQueue = queue else {
             throw AudioDeviceError.audioUnitError(status,
-                "AudioDeviceCreateIOProcID for input device \(deviceID)")
+                "AudioQueueNewInput for device \(deviceID)")
         }
-        self.ioProcID = procID
+        self.audioQueue = createdQueue
+
+        // 2. Set the target device via its UID string.
+        //    This directs the AudioQueue to capture from our specific device,
+        //    not the system default input.
+        //    kAudioQueueProperty_CurrentDevice expects a pointer to a CFStringRef.
+        let cfUID: CFString = deviceUID as CFString
+        let deviceStatus = withUnsafePointer(to: cfUID) { ptr in
+            AudioQueueSetProperty(
+                createdQueue,
+                kAudioQueueProperty_CurrentDevice,
+                ptr,
+                UInt32(MemoryLayout<CFString>.size)
+            )
+        }
+        guard deviceStatus == noErr else {
+            AudioQueueDispose(createdQueue, true)
+            self.audioQueue = nil
+            throw AudioDeviceError.audioUnitError(deviceStatus,
+                "AudioQueueSetProperty(CurrentDevice) for UID '\(deviceUID)'")
+        }
+
+        print("[AudioInputUnit] AudioQueue created for device \(deviceID) " +
+              "(UID: \(deviceUID)), format: " +
+              AudioFormatConverter.formatDescription(streamFormat))
+
+        // 3. Calculate buffer size for the desired duration.
+        //    Each buffer holds `bufferDurationSeconds` worth of audio.
+        let bytesPerFrame = streamFormat.mBytesPerFrame
+        let framesPerBuffer = UInt32(streamFormat.mSampleRate * Self.bufferDurationSeconds)
+        let bufferByteSize = framesPerBuffer * bytesPerFrame
+
+        // 4. Allocate and enqueue triple buffers.
+        audioQueueBuffers = []
+        audioQueueBuffers.reserveCapacity(Self.bufferCount)
+
+        for i in 0..<Self.bufferCount {
+            var buffer: AudioQueueBufferRef?
+            let allocStatus = AudioQueueAllocateBuffer(
+                createdQueue,
+                bufferByteSize,
+                &buffer
+            )
+            guard allocStatus == noErr, buffer != nil else {
+                // Clean up already-allocated buffers.
+                teardownAudioQueue()
+                throw AudioDeviceError.audioUnitError(allocStatus,
+                    "AudioQueueAllocateBuffer[\(i)] for device \(deviceID)")
+            }
+            audioQueueBuffers.append(buffer)
+
+            let enqueueStatus = AudioQueueEnqueueBuffer(
+                createdQueue,
+                buffer!,
+                0,
+                nil
+            )
+            guard enqueueStatus == noErr else {
+                teardownAudioQueue()
+                throw AudioDeviceError.audioUnitError(enqueueStatus,
+                    "AudioQueueEnqueueBuffer[\(i)] for device \(deviceID)")
+            }
+        }
+
         self.callbackCount = 0
 
-        print("[AudioInputUnit] IOProc registered for device \(deviceID)")
+        print("[AudioInputUnit] \(Self.bufferCount) buffers allocated " +
+              "(\(bufferByteSize) bytes each, \(framesPerBuffer) frames)")
     }
 
-    /// Remove the IOProc registration and release resources.
-    private func teardownIOProc() {
-        if let procID = ioProcID {
-            AudioDeviceDestroyIOProcID(deviceID, procID)
-            ioProcID = nil
+    /// Dispose of the AudioQueue and release all buffers.
+    private func teardownAudioQueue() {
+        if let queue = audioQueue {
+            // AudioQueueDispose also frees all associated buffers.
+            AudioQueueDispose(queue, true)
+            audioQueue = nil
         }
-        deviceNativeFormat = nil
-    }
-}
-
-// MARK: - Device IOProc (C function)
-
-/// The CoreAudio device IOProc callback. Called on the real-time audio thread
-/// when the device has captured new audio data. Unlike AUHAL, the captured
-/// audio is delivered directly in `inputData` — no AudioUnitRender call needed.
-///
-/// - Important: This runs on a real-time thread. No allocations, no locks,
-///   no syscalls. Only memcpy and atomics.
-private func inputIOProc(
-    _ deviceID: AudioObjectID,
-    _ now: UnsafePointer<AudioTimeStamp>,
-    _ inputData: UnsafePointer<AudioBufferList>,
-    _ inputTime: UnsafePointer<AudioTimeStamp>,
-    _ outputData: UnsafeMutablePointer<AudioBufferList>,
-    _ outputTime: UnsafePointer<AudioTimeStamp>,
-    _ clientData: UnsafeMutableRawPointer?
-) -> OSStatus {
-    guard let clientData = clientData else { return noErr }
-
-    let inputUnit = Unmanaged<AudioInputUnit>.fromOpaque(clientData)
-        .takeUnretainedValue()
-
-    inputUnit.callbackCount += 1
-    let cbCount = inputUnit.callbackCount
-
-    // Access the first buffer from the input data.
-    // The AudioBufferList is a variable-length struct; we read the first buffer.
-    let bufferCount = Int(inputData.pointee.mNumberBuffers)
-    guard bufferCount > 0 else {
-        return noErr
+        audioQueueBuffers = []
     }
 
-    let firstBuffer = inputData.pointee.mBuffers
-    let dataSize = Int(firstBuffer.mDataByteSize)
+    // MARK: - Internal: Callback Access
 
-    guard dataSize > 0, let rawData = firstBuffer.mData else {
-        return noErr
-    }
+    /// Called from the C callback function to process a captured buffer.
+    /// Writes captured PCM into the ring buffer and re-enqueues the buffer.
+    ///
+    /// - Important: This runs on the AudioQueue's internal thread. Keep it
+    ///   lightweight — only memcpy and atomics. No allocations or locks.
+    fileprivate func handleInputBuffer(
+        _ queue: AudioQueueRef,
+        _ buffer: AudioQueueBufferRef,
+        _ startTime: UnsafePointer<AudioTimeStamp>,
+        _ numPackets: UInt32
+    ) {
+        callbackCount += 1
+        let cbCount = callbackCount
 
-    let nativeChannels = Int(firstBuffer.mNumberChannels)
-    let targetChannels = Int(inputUnit.streamFormat.mChannelsPerFrame)
+        let dataSize = Int(buffer.pointee.mAudioDataByteSize)
+        guard dataSize > 0 else {
+            // Re-enqueue even if empty to keep the queue running.
+            AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
+            return
+        }
 
-    if !inputUnit.needsConversion {
-        // Fast path: native format is Float32 with matching channel count.
-        // Write directly from inputData into the ring buffer.
-        let sampleCount = dataSize / MemoryLayout<Float>.size
-        let frameCount = sampleCount / max(nativeChannels, 1)
+        let channelCount = Int(streamFormat.mChannelsPerFrame)
+        let bytesPerSample = Int(streamFormat.mBitsPerChannel / 8)
+        let sampleCount = dataSize / bytesPerSample
+        let frameCount = sampleCount / max(channelCount, 1)
 
-        let floatPtr = rawData.assumingMemoryBound(to: Float.self)
+        // The AudioQueue was created with Float32 interleaved format, so the
+        // buffer data is already in the correct format for the ring buffer.
+        let floatPtr = buffer.pointee.mAudioData
+            .assumingMemoryBound(to: Float.self)
         let source = UnsafeBufferPointer(start: floatPtr, count: sampleCount)
-        let written = inputUnit.ringBuffer.write(source, frameCount: frameCount)
+        let written = ringBuffer.write(source, frameCount: frameCount)
 
+        // Diagnostic logging for the first few callbacks and periodically after.
         if cbCount <= 5 || cbCount % 5000 == 0 {
-            // Check for non-zero audio data
             var maxAbs: Float = 0
-            for i in 0..<min(sampleCount, 64) {
+            let checkCount = min(sampleCount, 64)
+            for i in 0..<checkCount {
                 let v = abs(floatPtr[i])
                 if v > maxAbs { maxAbs = v }
             }
-            print("[AudioInputUnit] IOProc #\(cbCount): \(frameCount) frames " +
-                  "(direct), wrote \(written), peak=\(maxAbs)")
-        }
-    } else {
-        // Slow path: need format conversion.
-        guard let convBuf = inputUnit.conversionBuffer else { return noErr }
-
-        let nativeFormat = inputUnit.deviceNativeFormat
-        let nativeBitsPerChannel = nativeFormat?.mBitsPerChannel ?? 32
-        let nativeIsFloat = (nativeFormat?.mFormatFlags ?? 0) & kAudioFormatFlagIsFloat != 0
-        let nativeIsSignedInt = (nativeFormat?.mFormatFlags ?? 0) & kAudioFormatFlagIsSignedInteger != 0
-        let nativeBytesPerSample = Int(nativeBitsPerChannel / 8)
-
-        // Calculate frame count from the native format.
-        let nativeFrameBytes = nativeBytesPerSample * max(nativeChannels, 1)
-        let frameCount: Int
-        if nativeFrameBytes > 0 {
-            frameCount = dataSize / nativeFrameBytes
-        } else {
-            return noErr
+            print("[AudioInputUnit] AQ callback #\(cbCount): \(frameCount) frames, " +
+                  "wrote \(written), peak=\(maxAbs), bytes=\(dataSize)")
         }
 
-        // Guard against overflow of our conversion buffer.
-        guard frameCount <= inputUnit.conversionBufferFrameCapacity else {
-            return noErr
-        }
-
-        let outputSamples = frameCount * targetChannels
-
-        // Convert each frame: extract from native format, write as Float32
-        // into the conversion buffer with channel mapping.
-        if nativeIsFloat && nativeBitsPerChannel == 32 {
-            // Float32 source but channel count mismatch.
-            let srcFloats = rawData.assumingMemoryBound(to: Float.self)
-            let minChannels = min(nativeChannels, targetChannels)
-
-            for frame in 0..<frameCount {
-                let srcOffset = frame * nativeChannels
-                let dstOffset = frame * targetChannels
-
-                // Copy channels that exist in both.
-                for ch in 0..<Int(minChannels) {
-                    convBuf[dstOffset + ch] = srcFloats[srcOffset + ch]
-                }
-                // Zero-fill extra target channels.
-                for ch in Int(minChannels)..<targetChannels {
-                    convBuf[dstOffset + ch] = 0.0
-                }
-            }
-        } else if nativeIsSignedInt && nativeBitsPerChannel == 16 {
-            // Int16 source — convert to Float32.
-            let srcInt16 = rawData.assumingMemoryBound(to: Int16.self)
-            let scale: Float = 1.0 / 32768.0
-            let minChannels = min(nativeChannels, targetChannels)
-
-            for frame in 0..<frameCount {
-                let srcOffset = frame * nativeChannels
-                let dstOffset = frame * targetChannels
-
-                for ch in 0..<Int(minChannels) {
-                    convBuf[dstOffset + ch] = Float(srcInt16[srcOffset + ch]) * scale
-                }
-                for ch in Int(minChannels)..<targetChannels {
-                    convBuf[dstOffset + ch] = 0.0
-                }
-            }
-        } else if nativeIsSignedInt && nativeBitsPerChannel == 32 {
-            // Int32 source — convert to Float32.
-            let srcInt32 = rawData.assumingMemoryBound(to: Int32.self)
-            let scale: Float = 1.0 / 2147483648.0
-            let minChannels = min(nativeChannels, targetChannels)
-
-            for frame in 0..<frameCount {
-                let srcOffset = frame * nativeChannels
-                let dstOffset = frame * targetChannels
-
-                for ch in 0..<Int(minChannels) {
-                    convBuf[dstOffset + ch] = Float(srcInt32[srcOffset + ch]) * scale
-                }
-                for ch in Int(minChannels)..<targetChannels {
-                    convBuf[dstOffset + ch] = 0.0
-                }
-            }
-        } else {
-            // Unsupported native format — write silence.
-            for i in 0..<outputSamples {
-                convBuf[i] = 0.0
-            }
-            if cbCount <= 3 {
-                print("[AudioInputUnit] IOProc #\(cbCount): unsupported native format " +
-                      "(bits=\(nativeBitsPerChannel), float=\(nativeIsFloat), " +
-                      "int=\(nativeIsSignedInt)), outputting silence")
-            }
-        }
-
-        let source = UnsafeBufferPointer(start: convBuf, count: outputSamples)
-        let written = inputUnit.ringBuffer.write(source, frameCount: frameCount)
-
-        if cbCount <= 3 || cbCount % 5000 == 0 {
-            print("[AudioInputUnit] IOProc #\(cbCount): \(frameCount) frames " +
-                  "(converted), wrote \(written) to ring buffer")
-        }
+        // Re-enqueue the buffer so the AudioQueue can refill it.
+        AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
     }
+}
 
-    return noErr
+// MARK: - AudioQueue Input Callback (C function)
+
+/// The AudioQueue input callback. Called on the AudioQueue's internal thread
+/// when a buffer of captured audio is available.
+///
+/// - Important: This runs on a real-time-priority thread managed by AudioQueue.
+///   Keep it lightweight — only memcpy and atomics. No allocations, locks, or
+///   syscalls beyond the re-enqueue call.
+private func audioQueueInputCallback(
+    _ userData: UnsafeMutableRawPointer?,
+    _ queue: AudioQueueRef,
+    _ buffer: AudioQueueBufferRef,
+    _ startTime: UnsafePointer<AudioTimeStamp>,
+    _ numPackets: UInt32,
+    _ packetDescs: UnsafePointer<AudioStreamPacketDescription>?
+) {
+    guard let userData = userData else { return }
+
+    let inputUnit = Unmanaged<AudioInputUnit>.fromOpaque(userData)
+        .takeUnretainedValue()
+
+    inputUnit.handleInputBuffer(queue, buffer, startTime, numPackets)
 }
