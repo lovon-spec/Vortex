@@ -247,22 +247,18 @@ public final class AudioInputUnit: @unchecked Sendable {
             throw AudioDeviceError.audioUnitError(status, "Set input stream format")
         }
 
-        // 5b. Set the maximum frames per slice to avoid -10863 errors.
-        //     This pre-allocates internal buffers so AudioUnitRender
-        //     doesn't need to allocate on the real-time thread.
+        // 5b. Set the maximum frames per slice to pre-allocate internal buffers.
         var maxSlice: UInt32 = 4096
-        status = AudioUnitSetProperty(
-            unit,
-            kAudioUnitProperty_MaximumFramesPerSlice,
-            kAudioUnitScope_Global,
-            0,
-            &maxSlice,
-            UInt32(MemoryLayout<UInt32>.size)
-        )
-        // Non-fatal if this fails — some units ignore it.
-        if status != noErr {
-            print("[AudioInputUnit] Warning: MaximumFramesPerSlice set failed: \(status)")
-        }
+        AudioUnitSetProperty(unit, kAudioUnitProperty_MaximumFramesPerSlice,
+                             kAudioUnitScope_Global, 0, &maxSlice,
+                             UInt32(MemoryLayout<UInt32>.size))
+
+        // 5c. Tell the unit to allocate its own buffers for bus 1 input.
+        //     Without this, AudioUnitRender may fail with -10863.
+        var shouldAllocate: UInt32 = 1
+        AudioUnitSetProperty(unit, kAudioUnitProperty_ShouldAllocateBuffer,
+                             kAudioUnitScope_Output, 1, &shouldAllocate,
+                             UInt32(MemoryLayout<UInt32>.size))
 
         // 6. Allocate scratch buffer for the input callback.
         //    We allocate enough for the maximum expected callback size.
@@ -335,7 +331,8 @@ private func inputRenderCallback(
         return noErr
     }
 
-    // Set up an AudioBufferList pointing to our scratch buffer.
+    // Set up an AudioBufferList. We provide our scratch buffer but the unit
+    // may use its own if ShouldAllocateBuffer is set.
     let bytesPerSample = Int(inputUnit.streamFormat.mBitsPerChannel / 8)
     var bufferList = AudioBufferList(
         mNumberBuffers: 1,
@@ -356,17 +353,21 @@ private func inputRenderCallback(
         &bufferList
     )
     if status != noErr {
-        if inputUnit.callbackCount <= 3 {
+        if inputUnit.callbackCount <= 5 {
             print("[AudioInputUnit] AudioUnitRender failed: \(status)")
         }
-        return status
+        return noErr // Return noErr to keep the callback alive
     }
 
-    // Push rendered data into the ring buffer.
-    let source = UnsafeBufferPointer<Float>(start: scratch, count: totalSamples)
-    let written = inputUnit.ringBuffer.write(source, frameCount: frameCount)
-    if inputUnit.callbackCount <= 3 {
-        print("[AudioInputUnit] wrote \(written) frames to ring buffer (avail after: \(inputUnit.ringBuffer.framesAvailableForRead))")
+    // The unit may have rendered into its own buffer. Use whatever mData points to.
+    let renderedData = bufferList.mBuffers.mData?.assumingMemoryBound(to: Float.self) ?? scratch
+    let renderedSamples = Int(bufferList.mBuffers.mDataByteSize) / MemoryLayout<Float>.size
+    let renderedFrames = renderedSamples / channels
+
+    let source = UnsafeBufferPointer<Float>(start: renderedData, count: renderedSamples)
+    let written = inputUnit.ringBuffer.write(source, frameCount: renderedFrames)
+    if inputUnit.callbackCount <= 5 {
+        print("[AudioInputUnit] wrote \(written) frames to ring buffer (avail: \(inputUnit.ringBuffer.framesAvailableForRead))")
     }
 
     return noErr
