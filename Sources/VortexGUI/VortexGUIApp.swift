@@ -9,6 +9,7 @@
 //   codesign --sign - --entitlements Vortex.entitlements --force \
 //       .build/arm64-apple-macosx/debug/VortexGUI
 
+import os
 import SwiftUI
 import Virtualization
 import VortexAudio
@@ -244,23 +245,23 @@ final class VMController {
         }
 
         guard audioConfig.output != nil || audioConfig.input != nil else {
-            print("[audio] No audio devices configured, skipping vsock bridge")
+            VortexLog.gui.info("No audio devices configured, skipping vsock bridge")
             return
         }
 
-        print("[audio] VM socket devices: \(vm.socketDevices.count)")
+        VortexLog.gui.debug("VM socket devices: \(self.vm.socketDevices.count)")
         for (i, dev) in vm.socketDevices.enumerated() {
-            print("[audio]   device[\(i)]: \(type(of: dev))")
+            VortexLog.gui.debug("  device[\(i)]: \(String(describing: type(of: dev)))")
         }
 
         let bridge = VsockAudioBridge(vmID: config.id)
         do {
             try bridge.attach(to: vm, audioConfig: audioConfig)
             self.audioBridge = bridge
-            print("[audio] Vsock audio bridge attached — output: \(audioConfig.output?.hostDeviceName ?? "none"), input: \(audioConfig.input?.hostDeviceName ?? "none")")
-            print("[audio] Listening on vsock port 5198 for guest daemon connection...")
+            VortexLog.gui.info("Vsock audio bridge attached — output: \(audioConfig.output?.hostDeviceName ?? "none"), input: \(audioConfig.input?.hostDeviceName ?? "none")")
+            VortexLog.gui.info("Listening on vsock port 5198 for guest daemon connection")
         } catch {
-            print("[audio] Failed to attach vsock bridge: \(error)")
+            VortexLog.gui.error("Failed to attach vsock bridge: \(error)")
         }
     }
 

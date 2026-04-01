@@ -3,6 +3,7 @@
 
 import Foundation
 import Hypervisor
+import VortexCore
 
 // MARK: - ESR_EL2 Constants
 
@@ -143,7 +144,7 @@ public final class VCPUExitHandler: @unchecked Sendable {
         default:
             // Unhandled exception class -- log and stop.
             let pc = getRegister(vcpu: vcpu, reg: HV_REG_PC)
-            print("[VortexHV] Unhandled exception class 0x\(String(ec, radix: 16)) at PC=0x\(String(pc, radix: 16)), ESR=0x\(String(syndrome, radix: 16))")
+            VortexLog.hv.error("Unhandled exception class 0x\(String(ec, radix: 16)) at PC=0x\(String(pc, radix: 16)), ESR=0x\(String(syndrome, radix: 16))")
             return false
         }
     }
@@ -158,7 +159,7 @@ public final class VCPUExitHandler: @unchecked Sendable {
         let issValid = (iss & (1 << 24)) != 0
         guard issValid else {
             let pc = getRegister(vcpu: vcpu, reg: HV_REG_PC)
-            print("[VortexHV] Data abort with ISV=0 at PC=0x\(String(pc, radix: 16)) -- cannot decode MMIO")
+            VortexLog.hv.error("Data abort with ISV=0 at PC=0x\(String(pc, radix: 16)) -- cannot decode MMIO")
             return false
         }
 
@@ -268,7 +269,7 @@ public final class VCPUExitHandler: @unchecked Sendable {
         let op2 = (iss >> 17) & 0x7
         let rt = Int((iss >> 5) & 0x1F)
 
-        print("[VortexHV] SysReg trap at PC=0x\(String(pc, radix: 16)): \(isRead ? "MRS" : "MSR") S\(op0)_\(op1)_C\(crn)_C\(crm)_\(op2) Xt=X\(rt)")
+        VortexLog.hv.debug("SysReg trap at PC=0x\(String(pc, radix: 16)): \(isRead ? "MRS" : "MSR") S\(op0)_\(op1)_C\(crn)_C\(crm)_\(op2) Xt=X\(rt)")
 
         if isRead {
             // Return zero for unimplemented system registers.

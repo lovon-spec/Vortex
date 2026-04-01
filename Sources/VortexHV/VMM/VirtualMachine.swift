@@ -10,6 +10,7 @@
 
 import Foundation
 import Hypervisor
+import VortexCore
 
 // MARK: - Virtual Machine
 
@@ -122,7 +123,7 @@ public final class VirtualMachine: @unchecked Sendable {
     /// Load raw data into guest RAM at a given guest physical address.
     public func loadData(_ data: Data, at gpa: UInt64) {
         guard let hostPtr = memoryManager.hostPointer(for: gpa) else {
-            print("[VortexHV] Warning: no host mapping for GPA 0x\(String(gpa, radix: 16))")
+            VortexLog.hv.warning("No host mapping for GPA 0x\(String(gpa, radix: 16))")
             return
         }
         data.withUnsafeBytes { src in
@@ -348,14 +349,14 @@ public final class VirtualMachine: @unchecked Sendable {
             return true
 
         case 0x8400_0008: // PSCI_SYSTEM_OFF
-            print("[VortexHV] PSCI SYSTEM_OFF requested")
+            VortexLog.hv.info("PSCI SYSTEM_OFF requested")
             for thread in vcpuThreads {
                 thread.cancel()
             }
             return false // Stop the vCPU run loop
 
         case 0x8400_0009: // PSCI_SYSTEM_RESET
-            print("[VortexHV] PSCI SYSTEM_RESET requested")
+            VortexLog.hv.info("PSCI SYSTEM_RESET requested")
             for thread in vcpuThreads {
                 thread.cancel()
             }

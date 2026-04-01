@@ -15,6 +15,7 @@
 import AudioToolbox
 import CoreAudio
 import Foundation
+import VortexCore
 
 // MARK: - AudioInputUnit
 
@@ -62,9 +63,6 @@ public final class AudioInputUnit: @unchecked Sendable {
 
     /// Whether the unit is currently capturing.
     public private(set) var isRunning: Bool = false
-
-    /// Callback invocation counter for diagnostics.
-    var callbackCount: UInt64 = 0
 
     /// The AudioQueue instance, or `nil` if not set up.
     private var audioQueue: AudioQueueRef?
@@ -124,7 +122,7 @@ public final class AudioInputUnit: @unchecked Sendable {
                 "AudioQueueStart for input device \(deviceID) (\(deviceUID))")
         }
         isRunning = true
-        print("[AudioInputUnit] Started capture on device \(deviceID) (UID: \(deviceUID))")
+        VortexLog.audio.info("AudioInputUnit started capture on device \(self.deviceID) (UID: \(self.deviceUID))")
     }
 
     /// Stop capturing audio.
@@ -132,7 +130,7 @@ public final class AudioInputUnit: @unchecked Sendable {
         guard isRunning, let queue = audioQueue else { return }
         AudioQueueStop(queue, true) // synchronous stop
         isRunning = false
-        print("[AudioInputUnit] Stopped capture on device \(deviceID)")
+        VortexLog.audio.info("AudioInputUnit stopped capture on device \(self.deviceID)")
     }
 
     /// Switch this input unit to a different device.
@@ -254,9 +252,7 @@ public final class AudioInputUnit: @unchecked Sendable {
                 "AudioQueueSetProperty(CurrentDevice) for UID '\(deviceUID)'")
         }
 
-        print("[AudioInputUnit] AudioQueue created for device \(deviceID) " +
-              "(UID: \(deviceUID)), format: " +
-              AudioFormatConverter.formatDescription(streamFormat))
+        VortexLog.audio.info("AudioInputUnit AudioQueue created for device \(self.deviceID) (UID: \(self.deviceUID)), format: \(AudioFormatConverter.formatDescription(self.streamFormat))")
 
         // 3. Calculate buffer size for the desired duration.
         //    Each buffer holds `bufferDurationSeconds` worth of audio.
@@ -296,10 +292,7 @@ public final class AudioInputUnit: @unchecked Sendable {
             }
         }
 
-        self.callbackCount = 0
-
-        print("[AudioInputUnit] \(Self.bufferCount) buffers allocated " +
-              "(\(bufferByteSize) bytes each, \(framesPerBuffer) frames)")
+        VortexLog.audio.info("AudioInputUnit \(Self.bufferCount) buffers allocated (\(bufferByteSize) bytes each, \(framesPerBuffer) frames)")
     }
 
     /// Dispose of the AudioQueue and release all buffers.
@@ -325,9 +318,6 @@ public final class AudioInputUnit: @unchecked Sendable {
         _ startTime: UnsafePointer<AudioTimeStamp>,
         _ numPackets: UInt32
     ) {
-        callbackCount += 1
-        let cbCount = callbackCount
-
         let dataSize = Int(buffer.pointee.mAudioDataByteSize)
         guard dataSize > 0 else {
             // Re-enqueue even if empty to keep the queue running.
@@ -345,19 +335,7 @@ public final class AudioInputUnit: @unchecked Sendable {
         let floatPtr = buffer.pointee.mAudioData
             .assumingMemoryBound(to: Float.self)
         let source = UnsafeBufferPointer(start: floatPtr, count: sampleCount)
-        let written = ringBuffer.write(source, frameCount: frameCount)
-
-        // Diagnostic logging for the first few callbacks and periodically after.
-        if cbCount <= 5 || cbCount % 5000 == 0 {
-            var maxAbs: Float = 0
-            let checkCount = min(sampleCount, 64)
-            for i in 0..<checkCount {
-                let v = abs(floatPtr[i])
-                if v > maxAbs { maxAbs = v }
-            }
-            print("[AudioInputUnit] AQ callback #\(cbCount): \(frameCount) frames, " +
-                  "wrote \(written), peak=\(maxAbs), bytes=\(dataSize)")
-        }
+        _ = ringBuffer.write(source, frameCount: frameCount)
 
         // Re-enqueue the buffer so the AudioQueue can refill it.
         AudioQueueEnqueueBuffer(queue, buffer, 0, nil)

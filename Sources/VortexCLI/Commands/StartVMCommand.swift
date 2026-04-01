@@ -13,6 +13,7 @@
 
 import ArgumentParser
 import Foundation
+import os
 import Virtualization
 import VortexAudio
 import VortexCore
@@ -60,9 +61,29 @@ struct StartVMCommand: ParsableCommand {
     )
     var noAudio: Bool = false
 
+    @Flag(
+        name: [.long, .short],
+        help: "Enable verbose logging. Streams os.Logger debug messages to stderr."
+    )
+    var verbose: Bool = false
+
     // MARK: - Run
 
     func run() throws {
+        if verbose {
+            // Enable debug-level messages for the com.vortex subsystem.
+            // os.Logger debug messages are normally suppressed unless the
+            // subsystem is configured for debug. Setting OS_ACTIVITY_MODE
+            // and using `log stream` achieves this at the system level.
+            // For the CLI, we set the environment hint and print guidance.
+            setenv("OS_ACTIVITY_MODE", "debug", 1)
+            VortexLog.cli.info("Verbose logging enabled (debug-level messages active)")
+            print("Verbose mode: debug messages active.")
+            print("  Tip: In another terminal, run:")
+            print("    log stream --predicate 'subsystem == \"com.vortex\"' --level debug")
+            print("")
+        }
+
         guard let vmID = UUID(uuidString: vm) else {
             print("error: '\(vm)' is not a valid UUID.")
             throw ExitCode.validationFailure

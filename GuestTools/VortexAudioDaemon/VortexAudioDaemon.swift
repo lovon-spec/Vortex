@@ -126,6 +126,11 @@ final class VortexAudioDaemon {
     /// Whether the daemon should keep running.
     private var shouldRun = true
 
+    /// When true, emit detailed diagnostic messages (connection attempts,
+    /// shm validation, latency reports, sample rate changes). When false,
+    /// only lifecycle events (start, stop, connect, disconnect, errors) are logged.
+    var verbose: Bool = false
+
     /// The audio format we negotiate with the host.
     private var format: AudioFormat
 
@@ -268,7 +273,7 @@ final class VortexAudioDaemon {
     private func connect() -> Bool {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else {
-            log("socket() failed: errno \(errno) (\(errnoString()))")
+            logVerbose("socket() failed: errno \(errno) (\(errnoString()))")
             return false
         }
 
@@ -278,7 +283,7 @@ final class VortexAudioDaemon {
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = UInt16(VORTEX_AUDIO_PORT).bigEndian
         guard inet_pton(AF_INET, hostAddress, &addr.sin_addr) == 1 else {
-            log("Invalid host address: \(hostAddress)")
+            logVerbose("Invalid host address: \(hostAddress)")
             close(fd)
             return false
         }
@@ -290,7 +295,7 @@ final class VortexAudioDaemon {
         }
 
         guard result == 0 else {
-            log("connect(\(hostAddress):\(VORTEX_AUDIO_PORT)) failed: errno \(errno) (\(errnoString()))")
+            logVerbose("connect(\(hostAddress):\(VORTEX_AUDIO_PORT)) failed: errno \(errno) (\(errnoString()))")
             close(fd)
             return false
         }
@@ -551,7 +556,7 @@ final class VortexAudioDaemon {
             UInt32(littleEndian: buf.loadUnaligned(fromByteOffset: 0, as: UInt32.self))
         }
         let latencyMs = Double(bufferFrames) / Double(format.sampleRate) * 1000.0
-        log("Host reports buffer latency: \(bufferFrames) frames "
+        logVerbose("Host reports buffer latency: \(bufferFrames) frames "
             + "(~\(String(format: "%.1f", latencyMs))ms)")
     }
 
@@ -575,7 +580,7 @@ final class VortexAudioDaemon {
                 let mapped = mmap(nil, expectedSize,
                                   PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
                 if mapped == MAP_FAILED {
-                    log("mmap failed: errno \(errno) (\(errnoString()))")
+                    logVerbose("mmap failed: errno \(errno) (\(errnoString()))")
                     close(fd)
                     usleep(SHM_ATTACH_POLL_INTERVAL)
                     continue
@@ -587,7 +592,7 @@ final class VortexAudioDaemon {
                 let version = base.load(fromByteOffset: Self.offVersion, as: UInt32.self)
 
                 if magic != SHM_MAGIC || version != SHM_VERSION {
-                    log("Shared memory validation failed: magic=0x\(String(magic, radix: 16)), "
+                    logVerbose("Shared memory validation failed: magic=0x\(String(magic, radix: 16)), "
                         + "version=\(version) (expected magic=0x\(String(SHM_MAGIC, radix: 16)), "
                         + "version=\(SHM_VERSION))")
                     munmap(mapped, expectedSize)
@@ -649,7 +654,7 @@ final class VortexAudioDaemon {
         guard let base = shmBase else { return }
         let sr = base.load(fromByteOffset: Self.offSampleRate, as: UInt32.self)
         if sr > 0 && sr != format.sampleRate {
-            log("Sample rate changed: \(format.sampleRate) -> \(sr)")
+            logVerbose("Sample rate changed: \(format.sampleRate) -> \(sr)")
             format.sampleRate = sr
             sendConfigure()
         }
@@ -737,9 +742,16 @@ final class VortexAudioDaemon {
 
     // MARK: - Logging
 
+    /// Logs a lifecycle message (always printed).
     private func log(_ message: String) {
         let timestamp = ISO8601DateFormatter().string(from: Date())
         print("[\(timestamp)] VortexAudioDaemon: \(message)")
+    }
+
+    /// Logs a diagnostic message (only printed in verbose mode).
+    private func logVerbose(_ message: String) {
+        guard verbose else { return }
+        log(message)
     }
 
     private func errnoString() -> String {
@@ -772,6 +784,8 @@ enum VortexAudioDaemonMain {
         var bitsPerSample = DEFAULT_BITS_PER_SAMPLE
         var isFloat = DEFAULT_IS_FLOAT
 
+        var verbose = false
+
         let args = CommandLine.arguments
         var i = 1
         while i < args.count {
@@ -799,6 +813,8 @@ enum VortexAudioDaemonMain {
                     hostAddress = args[i + 1]
                     i += 1
                 }
+            case "--verbose", "-v":
+                verbose = true
             case "--help":
                 print("""
                     VortexAudioDaemon — Guest-side audio transport for Vortex VMM.
@@ -809,6 +825,7 @@ enum VortexAudioDaemonMain {
                       --bits <N>           Bits per sample (default: 32)
                       --int16              Use 16-bit signed integer format
                       --host <ip>          Host bridge IP (default: 192.168.64.1)
+                      --verbose, -v        Enable verbose diagnostic logging
                       --help               Show this help message
                     """)
                 return
@@ -824,6 +841,7 @@ enum VortexAudioDaemonMain {
             bitsPerSample: bitsPerSample,
             isFloat: isFloat
         )
+        daemon.verbose = verbose
         daemon.run()
     }
 }

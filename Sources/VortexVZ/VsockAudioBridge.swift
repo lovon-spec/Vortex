@@ -23,6 +23,7 @@
 
 import Darwin
 import Foundation
+import os
 import Virtualization
 import VortexAudio
 import VortexCore
@@ -272,7 +273,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
     private func startTCPListener() {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else {
-            print("[audio-tcp] Failed to create socket: errno \(errno)")
+            VortexLog.bridge.error("Failed to create TCP socket: errno \(errno)")
             return
         }
 
@@ -291,18 +292,18 @@ public final class VsockAudioBridge: @unchecked Sendable {
             }
         }
         guard bindResult == 0 else {
-            print("[audio-tcp] bind() failed: errno \(errno)")
+            VortexLog.bridge.error("TCP bind() failed: errno \(errno)")
             Darwin.close(fd)
             return
         }
 
         guard listen(fd, 2) == 0 else {
-            print("[audio-tcp] listen() failed: errno \(errno)")
+            VortexLog.bridge.error("TCP listen() failed: errno \(errno)")
             Darwin.close(fd)
             return
         }
 
-        print("[audio-tcp] Listening on TCP port \(Self.audioPort)")
+        VortexLog.bridge.info("Listening on TCP port \(Self.audioPort)")
         self.tcpListenFD = fd
 
         // Accept connections on a dispatch source.
@@ -322,7 +323,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
             var noDelay: Int32 = 1
             setsockopt(clientFD, IPPROTO_TCP, TCP_NODELAY, &noDelay, socklen_t(MemoryLayout<Int32>.size))
 
-            print("[audio-tcp] Guest daemon connected via TCP")
+            VortexLog.bridge.info("Guest daemon connected via TCP")
             self.handleTCPConnection(fd: clientFD)
         }
         source.resume()
@@ -485,15 +486,15 @@ public final class VsockAudioBridge: @unchecked Sendable {
 
             switch msgType {
             case .configure:
-                print("[audio-tcp] Received CONFIGURE (\(payload.count) bytes)")
+                VortexLog.bridge.info("Received CONFIGURE (\(payload.count) bytes)")
                 handleConfigure(payload: payload)
             case .pcmOutput:
                 handlePCMOutput(payload: payload)
             case .start:
-                print("[audio-tcp] Received START")
+                VortexLog.bridge.info("Received START")
                 handleStart()
             case .stop:
-                print("[audio-tcp] Received STOP")
+                VortexLog.bridge.info("Received STOP")
                 handleStop()
             case .latencyQuery:
                 handleLatencyQuery()
@@ -563,9 +564,9 @@ public final class VsockAudioBridge: @unchecked Sendable {
                 output: audioConfig.output,
                 input: audioConfig.input
             )
-            print("[audio-tcp] AudioRouter configured: \(format.sampleRate)Hz, \(format.channels)ch, \(format.bitsPerSample)bit")
+            VortexLog.bridge.info("AudioRouter configured: \(format.sampleRate)Hz, \(format.channels)ch, \(format.bitsPerSample)bit")
         } catch {
-            print("[audio-tcp] AudioRouter configure FAILED: \(error)")
+            VortexLog.bridge.error("AudioRouter configure failed: \(error)")
             return
         }
 
@@ -591,18 +592,18 @@ public final class VsockAudioBridge: @unchecked Sendable {
         do {
             try router.start()
             isStreaming = true
-            print("[audio-tcp] AudioRouter started, streaming=true")
+            VortexLog.bridge.info("AudioRouter started, streaming=true")
 
             // If input is configured, start the periodic send timer.
             if let rb = router.inputRingBuffer {
-                print("[audio-tcp] Input ring buffer available (capacity: \(rb.capacity) samples), starting input capture timer")
-                print("[audio-tcp] Input unit running: \(router.inputUnit?.isRunning ?? false)")
+                VortexLog.bridge.info("Input ring buffer available (capacity: \(rb.capacity) samples), starting input capture timer")
+                VortexLog.bridge.debug("Input unit running: \(router.inputUnit?.isRunning ?? false)")
                 startInputSendTimer()
             } else {
-                print("[audio-tcp] No input ring buffer — input capture disabled")
+                VortexLog.bridge.info("No input ring buffer — input capture disabled")
             }
         } catch {
-            print("[audio-tcp] AudioRouter start FAILED: \(error)")
+            VortexLog.bridge.error("AudioRouter start failed: \(error)")
         }
     }
 
@@ -614,24 +615,15 @@ public final class VsockAudioBridge: @unchecked Sendable {
         router?.stop()
     }
 
-    private var pcmOutputCount: UInt64 = 0
-
     /// Handles PCM_OUTPUT: guest playback data.
     ///
     /// Writes the raw PCM bytes into the output ring buffer, which the
     /// CoreAudio render callback reads from.
     private func handlePCMOutput(payload: Data) {
-        pcmOutputCount += 1
-        if pcmOutputCount <= 5 || pcmOutputCount % 100 == 0 {
-            print("[audio-tcp] PCM_OUTPUT #\(pcmOutputCount): \(payload.count) bytes")
-        }
-
         guard isStreaming,
               let ringBuffer = router?.outputRingBuffer,
               let format = negotiatedFormat else {
-            if pcmOutputCount <= 3 {
-                print("[audio-tcp] PCM_OUTPUT dropped: streaming=\(isStreaming), router=\(router != nil), format=\(negotiatedFormat != nil)")
-            }
+            VortexLog.bridge.debug("PCM_OUTPUT dropped: streaming=\(self.isStreaming), router=\(self.router != nil), format=\(self.negotiatedFormat != nil)")
             return
         }
 
@@ -719,7 +711,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
     private func startInputSendTimer() {
         inputSendTimer?.cancel()
 
-        print("[audio-tcp] Creating input timer on writeQueue...")
+        VortexLog.bridge.debug("Creating input timer on writeQueue")
         let timer = DispatchSource.makeTimerSource(queue: writeQueue)
         timer.schedule(
             deadline: .now(),
@@ -727,27 +719,17 @@ public final class VsockAudioBridge: @unchecked Sendable {
             leeway: .milliseconds(1)
         )
         timer.setEventHandler { [weak self] in
-            guard let self else {
-                print("[audio-tcp] Input timer: self is nil (bridge deallocated)")
-                return
-            }
+            guard let self else { return }
             self.sendInputCapture()
         }
         timer.resume()
         self.inputSendTimer = timer
-        print("[audio-tcp] Input timer started and resumed")
+        VortexLog.bridge.info("Input capture timer started")
     }
-
-    private var inputCaptureCount: UInt64 = 0
 
     /// Reads available captured audio from the input ring buffer and
     /// sends it to the guest.
     private func sendInputCapture() {
-        inputCaptureCount += 1
-        if inputCaptureCount <= 5 || inputCaptureCount % 500 == 0 {
-            print("[audio-tcp] Input poll #\(inputCaptureCount): streaming=\(isStreaming), router=\(router != nil), format=\(negotiatedFormat != nil), scratch=\(inputScratchBuffer != nil), inputRB=\(router?.inputRingBuffer != nil)")
-        }
-
         guard isStreaming,
               let ringBuffer = router?.inputRingBuffer,
               let format = negotiatedFormat,
@@ -756,9 +738,6 @@ public final class VsockAudioBridge: @unchecked Sendable {
         }
 
         let available = ringBuffer.framesAvailableForRead
-        if inputCaptureCount <= 5 || (available > 0 && inputCaptureCount % 100 == 0) {
-            print("[audio-tcp] Input avail: \(available) frames")
-        }
         guard available > 0 else { return }
 
         // Read up to what we have scratch space for.

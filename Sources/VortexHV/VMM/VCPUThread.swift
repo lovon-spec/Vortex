@@ -3,6 +3,7 @@
 
 import Foundation
 import Hypervisor
+import VortexCore
 
 // MARK: - VCPU Thread
 
@@ -123,7 +124,7 @@ public final class VCPUThread: @unchecked Sendable {
         onVCPUCreated?(vcpu)
 
         guard let exitPtr = exitInfo else {
-            print("[VortexHV] VCPU \(index): exit info pointer is nil after creation")
+            VortexLog.hv.error("VCPU \(self.index): exit info pointer is nil after creation")
             _ = hv_vcpu_destroy(vcpu)
             vcpuHandle = 0
             return
@@ -142,7 +143,7 @@ public final class VCPUThread: @unchecked Sendable {
             // Execute the vCPU until it exits.
             let runRet = hv_vcpu_run(vcpu)
             if runRet != HV_SUCCESS {
-                print("[VortexHV] VCPU \(index): hv_vcpu_run failed with error \(runRet)")
+                VortexLog.hv.error("VCPU \(self.index): hv_vcpu_run failed with error \(runRet)")
                 break
             }
 
@@ -152,7 +153,7 @@ public final class VCPUThread: @unchecked Sendable {
             case HV_EXIT_REASON_EXCEPTION:
                 let shouldContinue = exitHandler.handleException(vcpu: vcpu, exit: exit)
                 if !shouldContinue {
-                    print("[VortexHV] VCPU \(index): exit handler requested stop")
+                    VortexLog.hv.info("VCPU \(self.index): exit handler requested stop")
                     cancelledFlag.set()
                 }
 
@@ -165,7 +166,7 @@ public final class VCPUThread: @unchecked Sendable {
                 break
 
             default:
-                print("[VortexHV] VCPU \(index): unknown exit reason \(exit.reason.rawValue)")
+                VortexLog.hv.error("VCPU \(self.index): unknown exit reason \(exit.reason.rawValue)")
                 cancelledFlag.set()
             }
         }
