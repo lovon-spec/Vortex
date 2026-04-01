@@ -203,19 +203,12 @@ public final class AudioInputUnit: @unchecked Sendable {
             throw AudioDeviceError.audioUnitError(status, "Enable input IO")
         }
 
-        // 3. Disable output on the output scope (bus 0).
-        var disableIO: UInt32 = 0
-        status = AudioUnitSetProperty(
-            unit,
-            kAudioOutputUnitProperty_EnableIO,
-            kAudioUnitScope_Output,
-            0,  // bus 0 = output
-            &disableIO,
-            UInt32(MemoryLayout<UInt32>.size)
-        )
-        guard status == noErr else {
-            throw AudioDeviceError.audioUnitError(status, "Disable output IO")
-        }
+        // 3. Keep output enabled on bus 0.
+        //    Previously we disabled it, but this caused AudioUnitRender to
+        //    fail with -10863 (kAudioUnitErr_CannotDoInCurrentContext).
+        //    The HAL output unit needs its full IO cycle active for input
+        //    rendering to work. Output goes to the same device (BlackHole)
+        //    which is fine — it just produces silence on the output side.
 
         // 4. Set the input device.
         var devID = deviceID
