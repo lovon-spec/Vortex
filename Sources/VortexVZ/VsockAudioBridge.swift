@@ -271,7 +271,10 @@ public final class VsockAudioBridge: @unchecked Sendable {
     /// Starts a TCP listener on port 5198 bound to 0.0.0.0.
     private func startTCPListener() {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { return }
+        guard fd >= 0 else {
+            print("[audio-tcp] Failed to create socket: errno \(errno)")
+            return
+        }
 
         var reuse: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
@@ -288,15 +291,18 @@ public final class VsockAudioBridge: @unchecked Sendable {
             }
         }
         guard bindResult == 0 else {
+            print("[audio-tcp] bind() failed: errno \(errno)")
             Darwin.close(fd)
             return
         }
 
         guard listen(fd, 2) == 0 else {
+            print("[audio-tcp] listen() failed: errno \(errno)")
             Darwin.close(fd)
             return
         }
 
+        print("[audio-tcp] Listening on TCP port \(Self.audioPort)")
         self.tcpListenFD = fd
 
         // Accept connections on a dispatch source.
@@ -316,6 +322,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
             var noDelay: Int32 = 1
             setsockopt(clientFD, IPPROTO_TCP, TCP_NODELAY, &noDelay, socklen_t(MemoryLayout<Int32>.size))
 
+            print("[audio-tcp] Guest daemon connected via TCP")
             self.handleTCPConnection(fd: clientFD)
         }
         source.resume()
