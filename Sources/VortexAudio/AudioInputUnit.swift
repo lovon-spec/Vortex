@@ -338,11 +338,19 @@ private func inputRenderCallback(
         inNumberFrames,
         &bufferList
     )
-    guard status == noErr else { return status }
+    if status != noErr {
+        if inputUnit.callbackCount <= 3 {
+            print("[AudioInputUnit] AudioUnitRender failed: \(status)")
+        }
+        return status
+    }
 
     // Push rendered data into the ring buffer.
     let source = UnsafeBufferPointer<Float>(start: scratch, count: totalSamples)
-    inputUnit.ringBuffer.write(source, frameCount: frameCount)
+    let written = inputUnit.ringBuffer.write(source, frameCount: frameCount)
+    if inputUnit.callbackCount <= 3 {
+        print("[AudioInputUnit] wrote \(written) frames to ring buffer (avail after: \(inputUnit.ringBuffer.framesAvailableForRead))")
+    }
 
     return noErr
 }
