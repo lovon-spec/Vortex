@@ -53,25 +53,29 @@ struct RootView: View {
     @State private var viewModel = RootViewModel()
 
     var body: some View {
-        Group {
-            switch viewModel.mode {
-            case .loading:
-                ProgressView("Loading...")
-            case .picker(let configs):
-                VMPickerView(configs: configs) { config in
-                    viewModel.select(config)
+        NavigationStack {
+            Group {
+                switch viewModel.mode {
+                case .loading:
+                    ProgressView("Loading...")
+                        .navigationTitle("Vortex")
+                case .picker(let configs):
+                    VMPickerView(configs: configs) { config in
+                        viewModel.select(config)
+                    }
+                case .display(let controller):
+                    VMWindowView(controller: controller)
+                case .error(let message):
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.largeTitle)
+                        Text(message)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .navigationTitle("Vortex — Error")
                 }
-            case .display(let controller):
-                VMWindowView(controller: controller)
-            case .error(let message):
-                VStack(spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.largeTitle)
-                    Text(message)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .task {
@@ -161,6 +165,7 @@ final class VMController {
 
     var stateLabel: String = "Stopped"
     var isRunning: Bool = false
+    var isPaused: Bool = false
     var canStart: Bool = true
     var canStop: Bool = false
     var errorMessage: String?
@@ -237,6 +242,7 @@ final class VMController {
     private func updateState(_ state: VMState) {
         stateLabel = state.rawValue.capitalized
         isRunning = (state == .running)
+        isPaused = (state == .paused)
         canStart = state.canStart
         canStop = state.canStop
     }
@@ -245,6 +251,7 @@ final class VMController {
         let vzState = vm.state
         stateLabel = vzStateName(vzState).capitalized
         isRunning = (vzState == .running)
+        isPaused = (vzState == .paused)
         canStart = vm.canStart
         canStop = vm.canRequestStop || vm.canStop
     }
@@ -315,7 +322,7 @@ struct VMWindowView: View {
                     }
                 }
 
-                if controller.vm.state == .paused {
+                if controller.isPaused {
                     Button {
                         Task { await controller.resume() }
                     } label: {
