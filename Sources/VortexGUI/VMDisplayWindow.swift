@@ -185,10 +185,10 @@ private struct VMStatusBar: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // State indicator
+            // VM state indicator
             HStack(spacing: 6) {
                 Circle()
-                    .fill(stateColor)
+                    .fill(vmStateColor)
                     .frame(width: 7, height: 7)
                 Text(controller.stateLabel)
                     .font(.caption)
@@ -198,7 +198,7 @@ private struct VMStatusBar: View {
             Divider()
                 .frame(height: 12)
 
-            // Audio routing
+            // Audio routing summary
             HStack(spacing: 4) {
                 Image(systemName: audioIconName)
                     .font(.caption2)
@@ -211,15 +211,39 @@ private struct VMStatusBar: View {
 
             Spacer()
 
-            // Connection indicator
-            if controller.isRunning {
+            // Audio device warning
+            if let warning = controller.audioDeviceWarning {
                 HStack(spacing: 4) {
-                    Image(systemName: "antenna.radiowaves.left.and.right")
+                    Image(systemName: "exclamationmark.triangle.fill")
                         .font(.caption2)
-                        .foregroundStyle(.green)
-                    Text("Connected")
+                        .foregroundStyle(.orange)
+                    Text(warning)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.orange)
+                        .lineLimit(1)
+                }
+            }
+
+            // Guest audio connection indicator
+            if controller.isRunning && controller.config.audio.enabled {
+                if controller.isGuestConnected {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(.green)
+                            .frame(width: 6, height: 6)
+                        Text("Guest connected")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(.yellow)
+                            .frame(width: 6, height: 6)
+                        Text("Waiting for guest tools...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -228,7 +252,7 @@ private struct VMStatusBar: View {
                 HStack(spacing: 4) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.caption2)
-                        .foregroundStyle(.yellow)
+                        .foregroundStyle(.red)
                     Text(error)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -241,7 +265,7 @@ private struct VMStatusBar: View {
         .background(.bar)
     }
 
-    private var stateColor: Color {
+    private var vmStateColor: Color {
         if controller.isRunning { return .green }
         if controller.isPaused { return .yellow }
         return .gray
@@ -249,7 +273,9 @@ private struct VMStatusBar: View {
 
     private var audioIconName: String {
         if !controller.config.audio.enabled { return "speaker.slash.fill" }
-        if controller.config.audio.output != nil { return "speaker.wave.2.fill" }
+        if controller.audioDeviceWarning != nil { return "speaker.badge.exclamationmark.fill" }
+        if controller.isGuestConnected { return "speaker.wave.2.fill" }
+        if controller.config.audio.output != nil { return "speaker.fill" }
         return "speaker.fill"
     }
 }

@@ -39,6 +39,8 @@ struct AudioSettingsView: View {
     @State private var selectedInputUID: String = ""
     @State private var enumerationError: String?
     @State private var hasChanges: Bool = false
+    /// Tracks the original enabled state at sheet-open time so we can detect changes.
+    @State private var originalEnabled: Bool = true
 
     /// Sentinel UID representing "None" (disabled).
     private static let noneUID = "__none__"
@@ -267,6 +269,7 @@ struct AudioSettingsView: View {
     private func loadCurrentSelections() {
         selectedOutputUID = audioConfig.output?.hostDeviceUID ?? Self.noneUID
         selectedInputUID = audioConfig.input?.hostDeviceUID ?? Self.noneUID
+        originalEnabled = audioConfig.enabled
 
         // If the previously selected device is no longer present, reset to None.
         if selectedOutputUID != Self.noneUID,
@@ -288,6 +291,7 @@ struct AudioSettingsView: View {
         let currentInputUID = audioConfig.input?.hostDeviceUID ?? Self.noneUID
         hasChanges = (selectedOutputUID != currentOutputUID)
             || (selectedInputUID != currentInputUID)
+            || (audioConfig.enabled != originalEnabled)
     }
 
     /// Writes the picker selections back into the audioConfig binding.
