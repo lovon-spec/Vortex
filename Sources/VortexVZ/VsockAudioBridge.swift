@@ -719,6 +719,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
     private func startInputSendTimer() {
         inputSendTimer?.cancel()
 
+        print("[audio-tcp] Creating input timer on writeQueue...")
         let timer = DispatchSource.makeTimerSource(queue: writeQueue)
         timer.schedule(
             deadline: .now(),
@@ -726,10 +727,15 @@ public final class VsockAudioBridge: @unchecked Sendable {
             leeway: .milliseconds(1)
         )
         timer.setEventHandler { [weak self] in
-            self?.sendInputCapture()
+            guard let self else {
+                print("[audio-tcp] Input timer: self is nil (bridge deallocated)")
+                return
+            }
+            self.sendInputCapture()
         }
         timer.resume()
-        inputSendTimer = timer
+        self.inputSendTimer = timer
+        print("[audio-tcp] Input timer started and resumed")
     }
 
     private var inputCaptureCount: UInt64 = 0
