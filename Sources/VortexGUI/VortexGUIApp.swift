@@ -165,7 +165,7 @@ final class RootViewModel {
 final class VMController {
     let vm: VZVirtualMachine
     let manager: VZVMManager
-    let config: VMConfiguration
+    var config: VMConfiguration
 
     var stateLabel: String = "Stopped"
     var isRunning: Bool = false
@@ -173,6 +173,7 @@ final class VMController {
     var canStart: Bool = true
     var canStop: Bool = false
     var errorMessage: String?
+    var showAudioSettings: Bool = false
 
     private var stateObserver: VZVMStateObserver?
     private var audioBridge: VsockAudioBridge?
@@ -229,23 +230,15 @@ final class VMController {
     }
 
     private func attachAudioBridge() {
-        // Resolve audio devices — try BlackHole 16ch for output, BlackHole 2ch for input
-        // Fall back to whatever is in the VM config, or skip if no devices found
-        let enumerator = AudioDeviceEnumerator()
-        let allDevices = (try? enumerator.allDevices()) ?? []
+        let audioConfig = config.audio
 
-        // Always try to set up audio routing — use config if present, otherwise auto-detect BlackHole
-        var audioConfig = config.audio
-        audioConfig.enabled = true
-        if audioConfig.output == nil, let bh16 = allDevices.first(where: { $0.name == "BlackHole 16ch" && $0.isOutput }) {
-            audioConfig.output = AudioEndpointConfig(hostDeviceUID: bh16.uid, hostDeviceName: bh16.name)
-        }
-        if audioConfig.input == nil, let bh2 = allDevices.first(where: { $0.name == "BlackHole 2ch" && $0.isInput }) {
-            audioConfig.input = AudioEndpointConfig(hostDeviceUID: bh2.uid, hostDeviceName: bh2.name)
+        guard audioConfig.enabled else {
+            print("[audio] Audio is disabled in VM config, skipping vsock bridge")
+            return
         }
 
         guard audioConfig.output != nil || audioConfig.input != nil else {
-            VortexLog.gui.info("No audio devices configured, skipping vsock bridge")
+            VortexLog.gui.info("No audio devices configured — open Audio Settings to select devices")
             return
         }
 
@@ -263,6 +256,28 @@ final class VMController {
         } catch {
             VortexLog.gui.error("Failed to attach vsock bridge: \(error)")
         }
+    }
+
+    /// Persists the current audio config to disk and restarts the audio bridge.
+    ///
+    /// Called by `AudioSettingsView` when the user presses Apply.
+    func applyAudioSettings() {
+        // Persist to config.json.
+        let repo = VMRepository()
+        do {
+            try repo.update(config)
+            print("[audio] Audio config saved for VM \(config.id)")
+        } catch {
+            errorMessage = "Failed to save audio settings: \(error.localizedDescription)"
+            return
+        }
+
+        // Restart the audio bridge with the new config if the VM is running.
+        guard isRunning else { return }
+
+        audioBridge?.detach()
+        audioBridge = nil
+        attachAudioBridge()
     }
 
     func pause() async {
@@ -323,7 +338,7 @@ final class VMController {
 
 /// The main VM display view with a toolbar for Start/Stop/Pause controls.
 struct VMWindowView: View {
-    let controller: VMController
+    @Bindable var controller: VMController
 
     var body: some View {
         ZStack {
@@ -352,6 +367,12 @@ struct VMWindowView: View {
         .navigationTitle("\(controller.config.identity.name) — \(controller.stateLabel)")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    controller.showAudioSettings = true
+                } label: {
+                    Label("Audio Settings", systemImage: "speaker.wave.2")
+                }
+
                 if controller.canStart {
                     Button {
                         Task { await controller.start() }
@@ -384,6 +405,18 @@ struct VMWindowView: View {
                     }
                 }
             }
+        }
+        .sheet(isPresented: $controller.showAudioSettings) {
+            AudioSettingsView(
+                audioConfig: $controller.config.audio,
+                onApply: {
+                    controller.applyAudioSettings()
+                    controller.showAudioSettings = false
+                },
+                onDismiss: {
+                    controller.showAudioSettings = false
+                }
+            )
         }
     }
 }

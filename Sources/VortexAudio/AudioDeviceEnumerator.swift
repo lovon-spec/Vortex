@@ -10,7 +10,9 @@ import Foundation
 // MARK: - AudioHostDevice
 
 /// Describes a single CoreAudio host audio device.
-public struct AudioHostDevice: Sendable, Hashable, CustomStringConvertible {
+public struct AudioHostDevice: Sendable, Hashable, Identifiable, CustomStringConvertible {
+    /// Stable identity for SwiftUI (uses the persistent UID).
+    public var id: String { uid }
     /// The CoreAudio `AudioDeviceID` for this device.
     public let deviceID: AudioDeviceID
 
