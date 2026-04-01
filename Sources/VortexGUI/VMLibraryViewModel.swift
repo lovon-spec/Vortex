@@ -20,6 +20,7 @@ import VortexVZ
 /// - Creates and tracks VMController instances for running VMs
 /// - Provides the selection state for the sidebar
 /// - Opens VM display windows by publishing UUIDs
+/// - Creates, deletes, and updates VM configurations
 @MainActor
 @Observable
 final class VMLibraryViewModel {
@@ -44,9 +45,19 @@ final class VMLibraryViewModel {
     /// Set of VM IDs that have open display windows.
     var openDisplayWindows: Set<UUID> = []
 
+    /// Whether to show the VM creation wizard sheet.
+    var showCreationWizard: Bool = false
+
+    /// Whether to show the VM settings sheet.
+    var showSettings: Bool = false
+
+    /// Whether to show the delete confirmation alert.
+    var showDeleteConfirmation: Bool = false
+
     // MARK: - Dependencies
 
     private let repo = VMRepository()
+    private let fileManager = VMFileManager()
     private let manager = VZVMManager()
 
     // MARK: - Computed
@@ -157,5 +168,79 @@ final class VMLibraryViewModel {
         case running
         case paused
         case stopped
+    }
+
+    // MARK: - Create
+
+    /// Adds a newly created VM configuration to the library and selects it.
+    ///
+    /// The configuration and its on-disk bundle are assumed to already exist
+    /// (created by the wizard). This method refreshes the in-memory list.
+    func addCreatedVM(_ config: VMConfiguration) {
+        loadConfigurations()
+        selectedVMID = config.id
+        showCreationWizard = false
+        VortexLog.gui.info("VM added to library: \(config.identity.name)")
+    }
+
+    // MARK: - Delete
+
+    /// Deletes a VM's bundle and removes it from the library.
+    ///
+    /// The VM must be stopped before deletion. If it is running, the error
+    /// message is set and the VM is not deleted.
+    func deleteVM(id: UUID) {
+        guard !isRunning(id) else {
+            errorMessage = "Cannot delete a running VM. Stop it first."
+            return
+        }
+
+        do {
+            try repo.delete(id: id)
+            configurations.removeAll { $0.id == id }
+            if selectedVMID == id {
+                selectedVMID = configurations.first?.id
+            }
+            VortexLog.gui.info("VM deleted: \(id)")
+        } catch {
+            errorMessage = "Failed to delete VM: \(error.localizedDescription)"
+            VortexLog.gui.error("VM deletion failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Update
+
+    /// Persists an updated configuration and refreshes the in-memory list.
+    func updateVM(_ config: VMConfiguration) {
+        do {
+            try repo.update(config)
+            // Replace in the local list.
+            if let index = configurations.firstIndex(where: { $0.id == config.id }) {
+                configurations[index] = config.touchingModifiedDate()
+            }
+            VortexLog.gui.info("VM updated: \(config.identity.name)")
+        } catch {
+            errorMessage = "Failed to update VM: \(error.localizedDescription)"
+            VortexLog.gui.error("VM update failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - OS Install Check
+
+    /// Returns true if a macOS VM needs an OS install (disk is empty/sparse).
+    func needsOSInstall(for config: VMConfiguration) -> Bool {
+        guard config.guestOS == .macOS else { return false }
+        guard let disk = config.storage.bootDisk else { return true }
+
+        // Check if the disk image file has any real content.
+        // A newly created sparse disk has zero physical bytes allocated.
+        let diskURL = URL(fileURLWithPath: disk.imagePath)
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: diskURL.path),
+              let fileSize = attrs[.size] as? UInt64 else {
+            return true
+        }
+        // A sparse file reports its logical size, but the physical allocation
+        // is near zero. Use a threshold: if less than 1 MiB, treat as empty.
+        return fileSize < 1024 * 1024
     }
 }
