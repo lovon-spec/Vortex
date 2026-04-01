@@ -594,8 +594,9 @@ public final class VsockAudioBridge: @unchecked Sendable {
             print("[audio-tcp] AudioRouter started, streaming=true")
 
             // If input is configured, start the periodic send timer.
-            if router.inputRingBuffer != nil {
-                print("[audio-tcp] Input ring buffer available, starting input capture timer")
+            if let rb = router.inputRingBuffer {
+                print("[audio-tcp] Input ring buffer available (capacity: \(rb.capacity) samples), starting input capture timer")
+                print("[audio-tcp] Input unit running: \(router.inputUnit?.isRunning ?? false)")
                 startInputSendTimer()
             } else {
                 print("[audio-tcp] No input ring buffer — input capture disabled")
@@ -743,12 +744,13 @@ public final class VsockAudioBridge: @unchecked Sendable {
             return
         }
 
+        inputCaptureCount += 1
+        if inputCaptureCount <= 5 || inputCaptureCount % 500 == 0 {
+            print("[audio-tcp] Input poll #\(inputCaptureCount): avail=\(ringBuffer.framesAvailableForRead) frames")
+        }
+
         let available = ringBuffer.framesAvailableForRead
         guard available > 0 else { return }
-        inputCaptureCount += 1
-        if inputCaptureCount <= 3 || inputCaptureCount % 100 == 0 {
-            print("[audio-tcp] Input capture #\(inputCaptureCount): \(available) frames available")
-        }
 
         // Read up to what we have scratch space for.
         let maxFrames = inputScratchCapacity / Int(format.channels)
