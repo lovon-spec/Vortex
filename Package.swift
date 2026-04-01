@@ -207,6 +207,7 @@ let package = Package(
             name: "VortexGUI",
             dependencies: [
                 "VortexCore",
+                "VortexAudio",
                 "VortexPersistence",
                 "VortexVZ",
             ],
@@ -214,6 +215,8 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("Virtualization"),
                 .linkedFramework("AppKit"),
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("AudioToolbox"),
             ]
         ),
 

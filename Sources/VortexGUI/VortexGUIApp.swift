@@ -11,6 +11,7 @@
 
 import SwiftUI
 import Virtualization
+import VortexAudio
 import VortexCore
 import VortexPersistence
 import VortexVZ
@@ -173,6 +174,7 @@ final class VMController {
     var errorMessage: String?
 
     private var stateObserver: VZVMStateObserver?
+    private var audioBridge: VsockAudioBridge?
 
     init(vm: VZVirtualMachine, manager: VZVMManager, config: VMConfiguration) {
         self.vm = vm
@@ -202,6 +204,8 @@ final class VMController {
         do {
             try await manager.start(vm)
             updateFromVZState()
+            // Attach vsock audio bridge after VM starts
+            attachAudioBridge()
         } catch {
             errorMessage = error.localizedDescription
             stateLabel = "Error"
@@ -213,11 +217,46 @@ final class VMController {
         guard vm.canRequestStop || vm.canStop else { return }
         stateLabel = "Stopping"
         canStop = false
+        audioBridge?.detach()
+        audioBridge = nil
         do {
             try await manager.stop(vm)
             updateFromVZState()
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func attachAudioBridge() {
+        // Resolve audio devices — try BlackHole 16ch for output, BlackHole 2ch for input
+        // Fall back to whatever is in the VM config, or skip if no devices found
+        let enumerator = AudioDeviceEnumerator()
+        let allDevices = (try? enumerator.allDevices()) ?? []
+
+        var audioConfig = config.audio
+        if !audioConfig.enabled {
+            // Enable audio with default BlackHole devices if available
+            audioConfig.enabled = true
+            if let bh16 = allDevices.first(where: { $0.name == "BlackHole 16ch" && $0.isOutput }) {
+                audioConfig.output = AudioEndpointConfig(hostDeviceUID: bh16.uid, hostDeviceName: bh16.name)
+            }
+            if let bh2 = allDevices.first(where: { $0.name == "BlackHole 2ch" && $0.isInput }) {
+                audioConfig.input = AudioEndpointConfig(hostDeviceUID: bh2.uid, hostDeviceName: bh2.name)
+            }
+        }
+
+        guard audioConfig.output != nil || audioConfig.input != nil else {
+            print("[audio] No audio devices configured, skipping vsock bridge")
+            return
+        }
+
+        let bridge = VsockAudioBridge(vmID: config.id)
+        do {
+            try bridge.attach(to: vm, audioConfig: audioConfig)
+            self.audioBridge = bridge
+            print("[audio] Vsock audio bridge attached — output: \(audioConfig.output?.hostDeviceName ?? "none"), input: \(audioConfig.input?.hostDeviceName ?? "none")")
+        } catch {
+            print("[audio] Failed to attach vsock bridge: \(error)")
         }
     }
 
