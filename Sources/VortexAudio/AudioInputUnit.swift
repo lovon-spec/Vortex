@@ -59,7 +59,13 @@ public final class AudioInputUnit: @unchecked Sendable {
     public let ringBuffer: AudioRingBuffer
 
     /// The target audio stream format (what callers expect).
+    /// This is always at the pipeline's target sample rate.
     public private(set) var streamFormat: AudioStreamBasicDescription
+
+    /// The format the AudioQueue actually captures in. When the device's
+    /// native rate differs from the target, this will be at the device rate
+    /// and `resampleConverter` will convert to `streamFormat`.
+    private var captureFormat: AudioStreamBasicDescription
 
     /// Whether the unit is currently capturing.
     public private(set) var isRunning: Bool = false
@@ -70,22 +76,47 @@ public final class AudioInputUnit: @unchecked Sendable {
     /// Pre-allocated AudioQueue buffers for triple-buffering.
     private var audioQueueBuffers: [AudioQueueBufferRef?] = []
 
+    // MARK: - Sample rate conversion
+
+    /// Whether captured audio needs resampling before being written to the
+    /// ring buffer (device native rate differs from pipeline target rate).
+    private var needsResample: Bool = false
+
+    /// Converter for sample rate conversion when `needsResample` is `true`.
+    /// Created at setup time with the capture format as source and
+    /// `streamFormat` as destination.
+    private var resampleConverter: AudioFormatConverter?
+
+    /// Pre-allocated buffer for holding converted samples. Sized at setup
+    /// time to hold a full converted buffer's worth of frames. This avoids
+    /// allocations in the AudioQueue callback.
+    private var conversionBuffer: UnsafeMutableBufferPointer<Float>?
+
+    /// The number of frames `conversionBuffer` can hold.
+    private var conversionBufferFrameCapacity: Int = 0
+
     // MARK: - Init
 
     /// Creates an input unit that captures from a specific device.
     ///
     /// - Parameters:
     ///   - deviceID: The `AudioDeviceID` to capture from (must be an input device).
-    ///   - sampleRate: Sample rate in Hz (e.g. 44100, 48000).
+    ///   - sampleRate: Target sample rate in Hz (e.g. 48000). This is the rate
+    ///     that downstream consumers (the ring buffer, the VM) expect.
     ///   - channels: Number of channels (default 2 for stereo).
     ///   - bitDepth: Bit depth — 16 for Int16 or 32 for Float32 (default 32).
     ///   - bufferFrames: Ring buffer capacity in frames (default ~100ms at sample rate).
+    ///   - deviceNativeSampleRate: The actual sample rate the device is running
+    ///     at. When this differs from `sampleRate`, the AudioQueue will capture
+    ///     at the device's native rate and a converter will resample to the
+    ///     target rate. Pass `nil` to assume the device runs at `sampleRate`.
     public init(
         deviceID: AudioDeviceID,
         sampleRate: Float64 = 48000,
         channels: UInt32 = 2,
         bitDepth: UInt32 = 32,
-        bufferFrames: Int? = nil
+        bufferFrames: Int? = nil,
+        deviceNativeSampleRate: Float64? = nil
     ) throws {
         self.deviceID = deviceID
 
@@ -96,11 +127,32 @@ public final class AudioInputUnit: @unchecked Sendable {
         self.ringBuffer = AudioRingBuffer(frameCapacity: frames,
                                           channelCount: Int(channels))
 
+        // The target format is always at the pipeline's requested sample rate.
         self.streamFormat = AudioOutputUnit.makeStreamFormat(
             sampleRate: sampleRate,
             channels: channels,
             bitDepth: bitDepth
         )
+
+        // Determine whether we need to capture at a different rate than target.
+        let deviceRate = deviceNativeSampleRate ?? sampleRate
+        let rateMismatch = abs(deviceRate - sampleRate) >= 1.0
+
+        if rateMismatch {
+            // Capture at the device's native rate; we will resample in the callback.
+            self.captureFormat = AudioOutputUnit.makeStreamFormat(
+                sampleRate: deviceRate,
+                channels: channels,
+                bitDepth: bitDepth
+            )
+            self.needsResample = true
+            VortexLog.audio.info(
+                "AudioInputUnit: rate mismatch detected — device \(deviceID) at \(deviceRate) Hz, target \(sampleRate) Hz; resampling enabled"
+            )
+        } else {
+            self.captureFormat = self.streamFormat
+            self.needsResample = false
+        }
 
         try setupAudioQueue()
     }
@@ -108,6 +160,7 @@ public final class AudioInputUnit: @unchecked Sendable {
     deinit {
         stop()
         teardownAudioQueue()
+        deallocateConversionBuffer()
     }
 
     // MARK: - Lifecycle
@@ -209,19 +262,26 @@ public final class AudioInputUnit: @unchecked Sendable {
 
     /// Create the AudioQueue, set the target device, allocate buffers, and
     /// enqueue them so the queue is ready to start.
+    ///
+    /// When `needsResample` is `true`, the AudioQueue is created at the
+    /// device's native sample rate (`captureFormat`) rather than the
+    /// pipeline's target rate (`streamFormat`). An `AudioFormatConverter`
+    /// is created to resample captured audio, and a pre-allocated conversion
+    /// buffer is sized to hold the converted output.
     private func setupAudioQueue() throws {
-        // 1. Create input AudioQueue with our target format.
-        //    The callback receives captured PCM in the requested format —
-        //    AudioQueue handles any necessary sample rate / format conversion.
+        // 1. Create input AudioQueue at the capture format.
+        //    When rates match, captureFormat == streamFormat. When they differ,
+        //    captureFormat is at the device's native rate and we resample in the
+        //    callback before writing to the ring buffer.
         let refCon = Unmanaged.passUnretained(self).toOpaque()
         var queue: AudioQueueRef?
 
-        var format = streamFormat
+        var format = captureFormat
         let status = AudioQueueNewInput(
             &format,
             audioQueueInputCallback,
             refCon,
-            nil,    // run loop — nil uses internal thread
+            nil,    // run loop -- nil uses internal thread
             nil,    // run loop mode
             0,      // flags (reserved)
             &queue
@@ -252,15 +312,42 @@ public final class AudioInputUnit: @unchecked Sendable {
                 "AudioQueueSetProperty(CurrentDevice) for UID '\(deviceUID)'")
         }
 
-        VortexLog.audio.info("AudioInputUnit AudioQueue created for device \(self.deviceID) (UID: \(self.deviceUID)), format: \(AudioFormatConverter.formatDescription(self.streamFormat))")
+        VortexLog.audio.info(
+            "AudioInputUnit AudioQueue created for device \(self.deviceID) (UID: \(self.deviceUID)), capture: \(AudioFormatConverter.formatDescription(self.captureFormat)), target: \(AudioFormatConverter.formatDescription(self.streamFormat))"
+        )
 
-        // 3. Calculate buffer size for the desired duration.
-        //    Each buffer holds `bufferDurationSeconds` worth of audio.
-        let bytesPerFrame = streamFormat.mBytesPerFrame
-        let framesPerBuffer = UInt32(streamFormat.mSampleRate * Self.bufferDurationSeconds)
+        // 3. Set up the resampling converter and pre-allocate the conversion
+        //    buffer if the capture rate differs from the target rate.
+        if needsResample {
+            resampleConverter = try AudioFormatConverter(
+                from: captureFormat,
+                to: streamFormat
+            )
+            VortexLog.audio.info(
+                "AudioInputUnit resample converter created: \(AudioFormatConverter.formatDescription(self.captureFormat)) -> \(AudioFormatConverter.formatDescription(self.streamFormat))"
+            )
+
+            // Pre-allocate a conversion buffer large enough for one AudioQueue
+            // buffer's worth of converted output. The ratio of output-to-input
+            // frames equals (targetRate / captureRate). Add a small margin.
+            let captureFramesPerBuffer = Int(captureFormat.mSampleRate * Self.bufferDurationSeconds)
+            let ratio = streamFormat.mSampleRate / captureFormat.mSampleRate
+            let outputFrames = Int(ceil(Double(captureFramesPerBuffer) * ratio)) + 2
+            let outputSamples = outputFrames * Int(streamFormat.mChannelsPerFrame)
+            allocateConversionBuffer(sampleCapacity: outputSamples, frameCapacity: outputFrames)
+        } else {
+            resampleConverter = nil
+            deallocateConversionBuffer()
+        }
+
+        // 4. Calculate buffer size for the desired duration.
+        //    Each buffer holds `bufferDurationSeconds` worth of audio at the
+        //    capture rate (which may differ from the target rate).
+        let bytesPerFrame = captureFormat.mBytesPerFrame
+        let framesPerBuffer = UInt32(captureFormat.mSampleRate * Self.bufferDurationSeconds)
         let bufferByteSize = framesPerBuffer * bytesPerFrame
 
-        // 4. Allocate and enqueue triple buffers.
+        // 5. Allocate and enqueue triple buffers.
         audioQueueBuffers = []
         audioQueueBuffers.reserveCapacity(Self.bufferCount)
 
@@ -292,7 +379,7 @@ public final class AudioInputUnit: @unchecked Sendable {
             }
         }
 
-        VortexLog.audio.info("AudioInputUnit \(Self.bufferCount) buffers allocated (\(bufferByteSize) bytes each, \(framesPerBuffer) frames)")
+        VortexLog.audio.info("AudioInputUnit \(Self.bufferCount) buffers allocated (\(bufferByteSize) bytes each, \(framesPerBuffer) frames, resample=\(self.needsResample))")
     }
 
     /// Dispose of the AudioQueue and release all buffers.
@@ -303,6 +390,27 @@ public final class AudioInputUnit: @unchecked Sendable {
             audioQueue = nil
         }
         audioQueueBuffers = []
+        resampleConverter = nil
+    }
+
+    /// Allocate the pre-sized conversion buffer used during resampling.
+    /// Called once at setup time so the callback never allocates.
+    private func allocateConversionBuffer(sampleCapacity: Int, frameCapacity: Int) {
+        deallocateConversionBuffer()
+        let ptr = UnsafeMutablePointer<Float>.allocate(capacity: sampleCapacity)
+        ptr.initialize(repeating: 0, count: sampleCapacity)
+        conversionBuffer = UnsafeMutableBufferPointer(start: ptr, count: sampleCapacity)
+        conversionBufferFrameCapacity = frameCapacity
+    }
+
+    /// Free the conversion buffer.
+    private func deallocateConversionBuffer() {
+        if let buf = conversionBuffer {
+            buf.baseAddress?.deinitialize(count: buf.count)
+            buf.baseAddress?.deallocate()
+            conversionBuffer = nil
+            conversionBufferFrameCapacity = 0
+        }
     }
 
     // MARK: - Internal: Callback Access
@@ -310,8 +418,16 @@ public final class AudioInputUnit: @unchecked Sendable {
     /// Called from the C callback function to process a captured buffer.
     /// Writes captured PCM into the ring buffer and re-enqueues the buffer.
     ///
-    /// - Important: This runs on the AudioQueue's internal thread. Keep it
-    ///   lightweight — only memcpy and atomics. No allocations or locks.
+    /// When `needsResample` is `true`, the captured audio is at the device's
+    /// native rate and must be converted to the pipeline's target rate before
+    /// being written to the ring buffer. The conversion uses a pre-allocated
+    /// buffer and `AudioConverterFillComplexBuffer` -- both safe to call on
+    /// the AudioQueue thread (which is NOT a real-time CoreAudio thread, so
+    /// the converter's internal allocations are acceptable).
+    ///
+    /// - Important: This runs on the AudioQueue's internal thread. It performs
+    ///   memcpy, atomics, and (when resampling) AudioConverter calls. No
+    ///   user-level allocations or locks.
     fileprivate func handleInputBuffer(
         _ queue: AudioQueueRef,
         _ buffer: AudioQueueBufferRef,
@@ -325,17 +441,58 @@ public final class AudioInputUnit: @unchecked Sendable {
             return
         }
 
-        let channelCount = Int(streamFormat.mChannelsPerFrame)
-        let bytesPerSample = Int(streamFormat.mBitsPerChannel / 8)
+        let channelCount = Int(captureFormat.mChannelsPerFrame)
+        let bytesPerSample = Int(captureFormat.mBitsPerChannel / 8)
         let sampleCount = dataSize / bytesPerSample
         let frameCount = sampleCount / max(channelCount, 1)
 
-        // The AudioQueue was created with Float32 interleaved format, so the
-        // buffer data is already in the correct format for the ring buffer.
-        let floatPtr = buffer.pointee.mAudioData
-            .assumingMemoryBound(to: Float.self)
-        let source = UnsafeBufferPointer(start: floatPtr, count: sampleCount)
-        _ = ringBuffer.write(source, frameCount: frameCount)
+        if needsResample, let converter = resampleConverter,
+           let convBuf = conversionBuffer {
+            // Convert from device native rate to target rate.
+            let sourcePtr = buffer.pointee.mAudioData
+            do {
+                let result = try converter.convert(
+                    sourcePtr,
+                    sourceFrameCount: UInt32(frameCount)
+                )
+
+                let convertedFrames = Int(result.frameCount)
+                let convertedSamples = convertedFrames * Int(streamFormat.mChannelsPerFrame)
+
+                // Bounds check against our pre-allocated buffer.
+                guard convertedSamples <= convBuf.count,
+                      let convBase = convBuf.baseAddress else {
+                    // Fallback: drop this buffer rather than crashing.
+                    AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
+                    return
+                }
+
+                // Copy converted bytes into the Float conversion buffer.
+                result.data.withUnsafeBytes { rawBytes in
+                    guard let src = rawBytes.baseAddress else { return }
+                    let byteCount = min(
+                        convertedSamples * MemoryLayout<Float>.size,
+                        rawBytes.count
+                    )
+                    memcpy(convBase, src, byteCount)
+                }
+
+                let source = UnsafeBufferPointer(start: convBase, count: convertedSamples)
+                _ = ringBuffer.write(source, frameCount: convertedFrames)
+            } catch {
+                // Conversion failed -- drop this buffer rather than writing
+                // garbage or silence. This should be rare.
+                VortexLog.audio.error(
+                    "AudioInputUnit resample failed: \(error.localizedDescription)"
+                )
+            }
+        } else {
+            // No resampling needed -- write captured data directly.
+            let floatPtr = buffer.pointee.mAudioData
+                .assumingMemoryBound(to: Float.self)
+            let source = UnsafeBufferPointer(start: floatPtr, count: sampleCount)
+            _ = ringBuffer.write(source, frameCount: frameCount)
+        }
 
         // Re-enqueue the buffer so the AudioQueue can refill it.
         AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
