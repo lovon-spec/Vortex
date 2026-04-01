@@ -54,7 +54,10 @@ struct VortexApp: App {
         .defaultSize(width: 900, height: 600)
         .commands {
             CommandGroup(replacing: .newItem) {
-                // No "New" menu item -- VMs are created via CLI.
+                Button("New VM...") {
+                    viewModel.showCreationWizard = true
+                }
+                .keyboardShortcut("n", modifiers: .command)
             }
 
             CommandGroup(after: .sidebar) {

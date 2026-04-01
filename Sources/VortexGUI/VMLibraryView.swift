@@ -3,6 +3,7 @@
 //
 // NavigationSplitView with a sidebar showing all VMs (name, icon, status LED)
 // and a detail pane showing the selected VM's info and action buttons.
+// Includes toolbar buttons for creating new VMs and accessing VM settings.
 
 import SwiftUI
 import VortexCore
@@ -26,6 +27,31 @@ struct VMLibraryView: View {
         .frame(minWidth: 700, minHeight: 450)
         .task {
             viewModel.loadConfigurations()
+        }
+        .sheet(isPresented: $vm.showCreationWizard) {
+            VMCreationWizard(
+                onCreate: { config in
+                    viewModel.addCreatedVM(config)
+                },
+                onDismiss: {
+                    viewModel.showCreationWizard = false
+                }
+            )
+        }
+        .sheet(isPresented: $vm.showSettings) {
+            if let config = viewModel.selectedConfig {
+                VMSettingsView(
+                    config: config,
+                    isRunning: viewModel.isRunning(config.id),
+                    onSave: { updated in
+                        viewModel.updateVM(updated)
+                        viewModel.showSettings = false
+                    },
+                    onDismiss: {
+                        viewModel.showSettings = false
+                    }
+                )
+            }
         }
     }
 }
@@ -56,6 +82,15 @@ private struct SidebarView: View {
         .safeAreaInset(edge: .bottom) {
             HStack {
                 Button {
+                    viewModel.showCreationWizard = true
+                } label: {
+                    Label("New VM", systemImage: "plus")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("Create a new virtual machine")
+
+                Button {
                     viewModel.refresh()
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
@@ -79,6 +114,8 @@ private struct SidebarView: View {
 
 /// Empty state shown when no VMs exist.
 private struct EmptyLibraryView: View {
+    @Environment(VMLibraryViewModel.self) private var viewModel
+
     var body: some View {
         VStack(spacing: 12) {
             Image(systemName: "desktopcomputer.trianglebadge.exclamationmark")
@@ -88,18 +125,20 @@ private struct EmptyLibraryView: View {
             Text("No VMs Found")
                 .font(.headline)
 
-            Text("Create a VM with VortexCLI first.")
+            Text("Create a virtual machine to get started.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            Text("vortex create --name \"macOS Dev\" --os macOS")
-                .font(.caption)
-                .monospaced()
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(.quaternary.opacity(0.5))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+            Button {
+                viewModel.showCreationWizard = true
+            } label: {
+                Label("Create VM", systemImage: "plus.circle.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .controlSize(.large)
+            .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
@@ -212,7 +251,7 @@ private struct VMDetailContent: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                // Header
+                // Header with settings and delete buttons
                 headerSection
                     .padding(.horizontal, 24)
                     .padding(.top, 24)
@@ -220,6 +259,16 @@ private struct VMDetailContent: View {
 
                 Divider()
                     .padding(.horizontal, 24)
+
+                // Install macOS prompt for fresh VMs
+                if viewModel.needsOSInstall(for: config) {
+                    installPrompt
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 16)
+
+                    Divider()
+                        .padding(.horizontal, 24)
+                }
 
                 // Info grid
                 infoGrid
@@ -254,6 +303,14 @@ private struct VMDetailContent: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle(config.identity.name)
+        .alert("Delete VM", isPresented: Bindable(viewModel).showDeleteConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete", role: .destructive) {
+                viewModel.deleteVM(id: config.id)
+            }
+        } message: {
+            Text("Are you sure you want to delete \"\(config.identity.name)\"? This will permanently remove the VM and all its disk images. This action cannot be undone.")
+        }
     }
 
     // MARK: - Header
@@ -287,7 +344,64 @@ private struct VMDetailContent: View {
             }
 
             Spacer()
+
+            // Settings button
+            Button {
+                viewModel.showSettings = true
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.title3)
+            }
+            .buttonStyle(.borderless)
+            .help("VM Settings")
+
+            // Delete button
+            Button(role: .destructive) {
+                viewModel.showDeleteConfirmation = true
+            } label: {
+                Image(systemName: "trash")
+                    .font(.title3)
+            }
+            .buttonStyle(.borderless)
+            .help("Delete VM")
+            .disabled(isRunning)
         }
+    }
+
+    // MARK: - Install Prompt
+
+    private var installPrompt: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.title2)
+                .foregroundStyle(.blue)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("macOS Not Installed")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+
+                Text("This VM needs macOS installed before it can boot. Start the VM to begin the install process.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button {
+                openWindow(value: config.id)
+                Task {
+                    await viewModel.bootVM(id: config.id)
+                }
+            } label: {
+                Label("Install macOS", systemImage: "arrow.down.to.line")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+        }
+        .padding(14)
+        .background(.blue.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     private var statusBadge: some View {
