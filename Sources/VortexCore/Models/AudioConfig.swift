@@ -18,14 +18,26 @@ public struct AudioConfig: Codable, Sendable, Hashable {
     /// When `nil`, the system default input device is used.
     public var input: AudioEndpointConfig?
 
+    /// Explicit TCP port for the vsock audio bridge listener.
+    ///
+    /// When `nil` (the default), the bridge binds to port 0 and lets the OS
+    /// assign a free ephemeral port. The actual port is then communicated to
+    /// the guest daemon via a file written to the VM's shared folder.
+    ///
+    /// Set a specific port only for debugging or when the guest cannot read
+    /// the port file (e.g., no shared folder configured).
+    public var bridgePort: UInt16?
+
     public init(
         enabled: Bool = true,
         output: AudioEndpointConfig? = nil,
-        input: AudioEndpointConfig? = nil
+        input: AudioEndpointConfig? = nil,
+        bridgePort: UInt16? = nil
     ) {
         self.enabled = enabled
         self.output = output
         self.input = input
+        self.bridgePort = bridgePort
     }
 
     /// Audio disabled entirely.

@@ -243,6 +243,15 @@ public final class VsockAudioBridge: @unchecked Sendable {
     /// Whether the guest has signaled IO is active.
     public private(set) var isStreaming: Bool = false
 
+    /// The TCP port the bridge is actually listening on.
+    ///
+    /// When `AudioConfig.bridgePort` is `nil`, the bridge binds to port 0 and
+    /// the OS assigns a free ephemeral port. This property reflects the actual
+    /// port after `attach()` completes. Zero means no listener is active.
+    ///
+    /// The GUI can display this so users know which port each VM is using.
+    public private(set) var listeningPort: UInt16 = 0
+
     /// Set when a host audio device disconnects. Cleared on reconnect.
     public private(set) var deviceDisconnected: Bool = false
 
@@ -283,6 +292,16 @@ public final class VsockAudioBridge: @unchecked Sendable {
     /// The audio config from the Vortex VM configuration.
     private var audioConfig: AudioConfig?
 
+    /// Path to write the allocated TCP port number for the guest daemon.
+    ///
+    /// When set (typically to a file inside a VirtioFS shared folder), the
+    /// bridge writes the decimal port number here after binding so the guest
+    /// daemon can discover it without hardcoding.
+    ///
+    /// Expected guest-side path: `/Volumes/My Shared Files/<tag>/audio-port`
+    /// (macOS guest) or the mount point of the VirtioFS share.
+    private var portFilePath: String?
+
     /// Latency instrumentation collector. When non-nil and enabled, the bridge
     /// records timestamps on PCM_OUTPUT writes and the render callback measures
     /// the delta. Shared with AudioOutputUnit via the `latencyCollector` property.
@@ -314,8 +333,15 @@ public final class VsockAudioBridge: @unchecked Sendable {
     /// - Parameters:
     ///   - vm: The running VZ virtual machine.
     ///   - audioConfig: The per-VM audio routing configuration.
+    ///   - portFilePath: Optional path to write the allocated TCP port number.
+    ///     Typically a file inside a VirtioFS shared folder so the guest daemon
+    ///     can discover the port. Example: `"/path/to/shared/audio-port"`.
     /// - Throws: `VortexError` if the VM has no vsock device or audio is disabled.
-    public func attach(to vm: VZVirtualMachine, audioConfig: AudioConfig) throws {
+    public func attach(
+        to vm: VZVirtualMachine,
+        audioConfig: AudioConfig,
+        portFilePath: String? = nil
+    ) throws {
         guard audioConfig.enabled else {
             return // Nothing to do — audio is disabled.
         }
@@ -328,6 +354,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
         }
 
         self.audioConfig = audioConfig
+        self.portFilePath = portFilePath
         self.socketDevice = device
 
         // Set up the VZ vsock listener for incoming guest connections.
@@ -338,9 +365,18 @@ public final class VsockAudioBridge: @unchecked Sendable {
         self.vsockListener = listener
         self.vsockListenerDelegate = delegate
 
-        // Also start a TCP listener on the same port as fallback.
-        // macOS guests may not support AF_VSOCK from userspace.
-        startTCPListener()
+        // Start a TCP listener as fallback for guests that cannot use AF_VSOCK.
+        // Binds to the port from audioConfig.bridgePort, or port 0 (OS-assigned)
+        // if nil. The actual port is stored in `listeningPort` and optionally
+        // written to `portFilePath` for the guest daemon to discover.
+        //
+        // Guest daemon change needed (not implemented here):
+        //   The daemon currently hardcodes 192.168.64.1:5198. It should instead:
+        //   1. Check for a port file at the VirtioFS mount point:
+        //      /Volumes/My Shared Files/<tag>/audio-port
+        //   2. Fall back to a --port CLI argument
+        //   3. Fall back to 5198 as last resort
+        startTCPListener(requestedPort: audioConfig.bridgePort)
 
         isAttached = true
     }
@@ -349,8 +385,14 @@ public final class VsockAudioBridge: @unchecked Sendable {
     private var tcpListenFD: Int32 = -1
     private var tcpListenSource: DispatchSourceRead?
 
-    /// Starts a TCP listener on port 5198 bound to 0.0.0.0.
-    private func startTCPListener() {
+    /// Starts a TCP listener bound to 0.0.0.0 on the given port.
+    ///
+    /// - Parameter requestedPort: The port to bind. When `nil`, binds to port 0
+    ///   so the OS assigns a free ephemeral port. After binding, the actual port
+    ///   is resolved via `getsockname()` and stored in ``listeningPort``.
+    ///   If ``portFilePath`` is set, the port number is written there so the
+    ///   guest daemon can discover it.
+    private func startTCPListener(requestedPort: UInt16? = nil) {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else {
             VortexLog.bridge.error("Failed to create TCP socket: errno \(errno)")
@@ -360,10 +402,12 @@ public final class VsockAudioBridge: @unchecked Sendable {
         var reuse: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
 
+        let bindPort = requestedPort ?? 0
+
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = UInt16(Self.audioPort).bigEndian
+        addr.sin_port = bindPort.bigEndian
         addr.sin_addr.s_addr = INADDR_ANY.bigEndian
 
         let bindResult = withUnsafePointer(to: &addr) { ptr in
@@ -372,7 +416,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
             }
         }
         guard bindResult == 0 else {
-            VortexLog.bridge.error("TCP bind() failed: errno \(errno)")
+            VortexLog.bridge.error("TCP bind() failed on port \(bindPort): errno \(errno)")
             Darwin.close(fd)
             return
         }
@@ -383,8 +427,28 @@ public final class VsockAudioBridge: @unchecked Sendable {
             return
         }
 
-        VortexLog.bridge.info("Listening on TCP port \(Self.audioPort)")
+        // Resolve the actual port the OS assigned (critical when bindPort == 0).
+        var boundAddr = sockaddr_in()
+        var boundLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameResult = withUnsafeMutablePointer(to: &boundAddr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(fd, $0, &boundLen)
+            }
+        }
+        let actualPort: UInt16
+        if nameResult == 0 {
+            actualPort = UInt16(bigEndian: boundAddr.sin_port)
+        } else {
+            VortexLog.bridge.warning("getsockname() failed: errno \(errno), using requested port \(bindPort)")
+            actualPort = bindPort
+        }
+
+        self.listeningPort = actualPort
+        VortexLog.bridge.info("Listening on TCP port \(actualPort) (requested: \(bindPort == 0 ? "auto" : String(bindPort)))")
         self.tcpListenFD = fd
+
+        // Write the port to a file so the guest daemon can discover it.
+        writePortFile(port: actualPort)
 
         // Accept connections on a dispatch source.
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: readQueue)
@@ -403,11 +467,36 @@ public final class VsockAudioBridge: @unchecked Sendable {
             var noDelay: Int32 = 1
             setsockopt(clientFD, IPPROTO_TCP, TCP_NODELAY, &noDelay, socklen_t(MemoryLayout<Int32>.size))
 
-            VortexLog.bridge.info("Guest daemon connected via TCP")
+            VortexLog.bridge.info("Guest daemon connected via TCP (port \(actualPort))")
             self.handleTCPConnection(fd: clientFD)
         }
         source.resume()
         self.tcpListenSource = source
+    }
+
+    /// Writes the listening port number to ``portFilePath`` so the guest
+    /// daemon can discover which port to connect to.
+    ///
+    /// The file contains just the decimal port number followed by a newline.
+    /// Parent directories are created if they don't exist.
+    private func writePortFile(port: UInt16) {
+        guard let path = portFilePath else { return }
+
+        let url = URL(fileURLWithPath: path)
+        let dir = url.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try "\(port)\n".write(toFile: path, atomically: true, encoding: .utf8)
+            VortexLog.bridge.info("Wrote audio port \(port) to \(path)")
+        } catch {
+            VortexLog.bridge.error("Failed to write port file at \(path): \(error)")
+        }
+    }
+
+    /// Removes the port file written by ``writePortFile(port:)``.
+    private func removePortFile() {
+        guard let path = portFilePath else { return }
+        try? FileManager.default.removeItem(atPath: path)
     }
 
     /// Detaches the bridge, closing any active connection and releasing
@@ -444,6 +533,10 @@ public final class VsockAudioBridge: @unchecked Sendable {
             Darwin.close(tcpListenFD)
             tcpListenFD = -1
         }
+
+        removePortFile()
+        listeningPort = 0
+        portFilePath = nil
 
         vsockListener = nil
         vsockListenerDelegate = nil
