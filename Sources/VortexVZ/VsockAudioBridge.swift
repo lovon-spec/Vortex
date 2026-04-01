@@ -563,9 +563,9 @@ public final class VsockAudioBridge: @unchecked Sendable {
                 output: audioConfig.output,
                 input: audioConfig.input
             )
+            print("[audio-tcp] AudioRouter configured: \(format.sampleRate)Hz, \(format.channels)ch, \(format.bitsPerSample)bit")
         } catch {
-            // Configuration failed — the guest will not get audio.
-            // A production build would report this via telemetry.
+            print("[audio-tcp] AudioRouter configure FAILED: \(error)")
             return
         }
 
@@ -591,13 +591,14 @@ public final class VsockAudioBridge: @unchecked Sendable {
         do {
             try router.start()
             isStreaming = true
+            print("[audio-tcp] AudioRouter started, streaming=true")
 
             // If input is configured, start the periodic send timer.
             if router.inputRingBuffer != nil {
                 startInputSendTimer()
             }
         } catch {
-            // Failed to start audio — guest will get silence.
+            print("[audio-tcp] AudioRouter start FAILED: \(error)")
         }
     }
 
@@ -617,10 +618,8 @@ public final class VsockAudioBridge: @unchecked Sendable {
     /// CoreAudio render callback reads from.
     private func handlePCMOutput(payload: Data) {
         pcmOutputCount += 1
-        if pcmOutputCount == 1 {
-            print("[audio-tcp] First PCM_OUTPUT received: \(payload.count) bytes")
-        } else if pcmOutputCount % 1000 == 0 {
-            print("[audio-tcp] PCM_OUTPUT count: \(pcmOutputCount)")
+        if pcmOutputCount <= 5 || pcmOutputCount % 100 == 0 {
+            print("[audio-tcp] PCM_OUTPUT #\(pcmOutputCount): \(payload.count) bytes")
         }
 
         guard isStreaming,
