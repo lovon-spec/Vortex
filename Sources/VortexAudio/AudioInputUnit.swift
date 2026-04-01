@@ -183,6 +183,25 @@ public final class AudioInputUnit: @unchecked Sendable {
     /// Query the device's native input format, register the IOProc, and
     /// allocate any conversion buffers needed.
     private func setupIOProc() throws {
+        // 0. Set the device's sample rate to match our target format.
+        //    This is critical for loopback devices like BlackHole where
+        //    input and output must agree on the sample rate.
+        var targetRate = streamFormat.mSampleRate
+        var rateAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let rateStatus = AudioObjectSetPropertyData(
+            deviceID, &rateAddress, 0, nil,
+            UInt32(MemoryLayout<Float64>.size), &targetRate
+        )
+        if rateStatus == noErr {
+            print("[AudioInputUnit] Set device \(deviceID) sample rate to \(targetRate) Hz")
+        } else {
+            print("[AudioInputUnit] Warning: could not set sample rate: \(rateStatus)")
+        }
+
         // 1. Query the device's native stream format on the input scope.
         var nativeFormat = AudioStreamBasicDescription()
         var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
