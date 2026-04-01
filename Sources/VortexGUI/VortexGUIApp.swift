@@ -248,11 +248,17 @@ final class VMController {
             return
         }
 
+        print("[audio] VM socket devices: \(vm.socketDevices.count)")
+        for (i, dev) in vm.socketDevices.enumerated() {
+            print("[audio]   device[\(i)]: \(type(of: dev))")
+        }
+
         let bridge = VsockAudioBridge(vmID: config.id)
         do {
             try bridge.attach(to: vm, audioConfig: audioConfig)
             self.audioBridge = bridge
             print("[audio] Vsock audio bridge attached — output: \(audioConfig.output?.hostDeviceName ?? "none"), input: \(audioConfig.input?.hostDeviceName ?? "none")")
+            print("[audio] Listening on vsock port 5198 for guest daemon connection...")
         } catch {
             print("[audio] Failed to attach vsock bridge: \(error)")
         }
