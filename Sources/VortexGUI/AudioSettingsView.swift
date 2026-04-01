@@ -1,10 +1,13 @@
-// AudioSettingsView.swift — Per-VM audio device selection UI.
+// AudioSettingsView.swift -- Per-VM audio device selection UI.
 // VortexGUI
 //
 // Presents dropdown menus for selecting host output and input audio devices
 // for a specific VM. Selections are persisted to config.json via VMRepository
 // and take effect on the next audio bridge attach (or immediately if applied
 // while the bridge is running).
+//
+// Styled with section headers, UID display, and muted dark theme to match
+// the Vortex aesthetic.
 
 import SwiftUI
 import VortexAudio
@@ -41,99 +44,67 @@ struct AudioSettingsView: View {
     private static let noneUID = "__none__"
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 0) {
             // Header
-            Text("Audio Settings")
-                .font(.headline)
-
-            if let error = enumerationError {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.yellow)
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            // Output device picker
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Output Device")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
-                Picker("Output", selection: $selectedOutputUID) {
-                    Text("None (disabled)")
-                        .tag(Self.noneUID)
-
-                    ForEach(outputDevices) { device in
-                        Text("\(device.name)")
-                            .tag(device.uid)
-                    }
-                }
-                .labelsHidden()
-
-                if let uid = effectiveOutputUID {
-                    Text("UID: \(uid)")
-                        .font(.caption2)
-                        .monospaced()
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-
-            // Input device picker
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Input Device")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
-                Picker("Input", selection: $selectedInputUID) {
-                    Text("None (disabled)")
-                        .tag(Self.noneUID)
-
-                    ForEach(inputDevices) { device in
-                        Text("\(device.name)")
-                            .tag(device.uid)
-                    }
-                }
-                .labelsHidden()
-
-                if let uid = effectiveInputUID {
-                    Text("UID: \(uid)")
-                        .font(.caption2)
-                        .monospaced()
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-
-            // Audio enabled toggle
-            Toggle("Audio Enabled", isOn: $audioConfig.enabled)
-                .font(.subheadline)
+            header
+                .padding(.horizontal, 24)
+                .padding(.top, 24)
+                .padding(.bottom, 20)
 
             Divider()
+                .padding(.horizontal, 16)
+
+            // Error banner
+            if let error = enumerationError {
+                errorBanner(error)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 12)
+            }
+
+            // Output device section
+            deviceSection(
+                title: "Output Device",
+                icon: "speaker.wave.2.fill",
+                selection: $selectedOutputUID,
+                devices: outputDevices,
+                uid: effectiveOutputUID
+            )
+            .padding(.horizontal, 24)
+            .padding(.top, 20)
+
+            // Input device section
+            deviceSection(
+                title: "Input Device",
+                icon: "mic.fill",
+                selection: $selectedInputUID,
+                devices: inputDevices,
+                uid: effectiveInputUID
+            )
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+
+            // Audio enabled toggle
+            Divider()
+                .padding(.horizontal, 16)
+                .padding(.top, 20)
+
+            Toggle(isOn: $audioConfig.enabled) {
+                Label("Audio Enabled", systemImage: audioConfig.enabled ? "speaker.wave.2" : "speaker.slash")
+                    .font(.subheadline)
+            }
+            .toggleStyle(.switch)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+
+            Divider()
+                .padding(.horizontal, 16)
 
             // Action buttons
-            HStack {
-                Spacer()
-                Button("Cancel") {
-                    onDismiss()
-                }
-                .keyboardShortcut(.cancelAction)
-
-                Button("Apply") {
-                    applySelections()
-                    onApply()
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(!hasChanges)
-            }
+            actionButtons
+                .padding(.horizontal, 24)
+                .padding(.vertical, 16)
         }
-        .padding(20)
-        .frame(width: 380)
+        .frame(width: 420)
         .onAppear {
             refreshDevices()
             loadCurrentSelections()
@@ -146,6 +117,120 @@ struct AudioSettingsView: View {
         }
         .onChange(of: audioConfig.enabled) {
             updateHasChanges()
+        }
+    }
+
+    // MARK: - Header
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "speaker.wave.2.circle.fill")
+                .font(.title2)
+                .foregroundStyle(.blue)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Audio Settings")
+                    .font(.headline)
+                Text("Configure host audio device routing for this VM")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+        }
+    }
+
+    // MARK: - Device Section
+
+    private func deviceSection(
+        title: String,
+        icon: String,
+        selection: Binding<String>,
+        devices: [AudioHostDevice],
+        uid: String?
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Section header
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+            }
+
+            // Picker
+            Picker(title, selection: selection) {
+                Text("None (disabled)")
+                    .tag(Self.noneUID)
+
+                if !devices.isEmpty {
+                    Divider()
+                }
+
+                ForEach(devices) { device in
+                    Text(device.name)
+                        .tag(device.uid)
+                }
+            }
+            .labelsHidden()
+
+            // UID display
+            if let uid = uid {
+                HStack(spacing: 4) {
+                    Text("UID:")
+                        .font(.caption2)
+                        .foregroundStyle(.quaternary)
+                    Text(uid)
+                        .font(.caption2)
+                        .monospaced()
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+        }
+    }
+
+    // MARK: - Error Banner
+
+    private func errorBanner(_ message: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.yellow)
+                .font(.caption)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.yellow.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    // MARK: - Action Buttons
+
+    private var actionButtons: some View {
+        HStack {
+            Spacer()
+
+            Button("Cancel") {
+                onDismiss()
+            }
+            .keyboardShortcut(.cancelAction)
+
+            Button("Apply") {
+                applySelections()
+                onApply()
+            }
+            .keyboardShortcut(.defaultAction)
+            .disabled(!hasChanges)
+            .buttonStyle(.borderedProminent)
         }
     }
 

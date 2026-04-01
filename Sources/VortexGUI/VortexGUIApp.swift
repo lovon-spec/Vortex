@@ -1,13 +1,17 @@
-// VortexGUIApp.swift — Minimal macOS app that boots a VM and shows its display.
+// VortexGUIApp.swift -- Polished native macOS app for VM management.
 // VortexGUI
 //
-// Usage:
-//   VortexGUI <vm-uuid>       — boot and display the specified VM
-//   VortexGUI                 — show a picker of available VMs
+// Provides two window scenes:
+// 1. VM Library -- NavigationSplitView showing all VMs with status LEDs
+// 2. VM Display -- opens when a VM starts, shows VZVirtualMachineView
 //
-// After building, the binary must be codesigned with Vortex.entitlements:
-//   codesign --sign - --entitlements Vortex.entitlements --force \
-//       .build/arm64-apple-macosx/debug/VortexGUI
+// Launch modes:
+//   VortexGUI              -- show the VM library
+//   VortexGUI <uuid>       -- go directly to VM display for that UUID
+//   open .build/Vortex.app --args <uuid>  -- same, via open(1)
+//
+// Design: dark appearance, native Cocoa, transparent titlebar tinted dark.
+// Inspired by the Intendant macOS app aesthetic.
 
 import os
 import SwiftUI
@@ -20,441 +24,140 @@ import VortexVZ
 // MARK: - App Entry Point
 
 @main
-struct VortexGUIApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+struct VortexApp: App {
+    @NSApplicationDelegateAdaptor(VortexAppDelegate.self) var appDelegate
+    @State private var viewModel = VMLibraryViewModel()
+
+    /// If a UUID was passed on the command line, open its display directly.
+    private var launchVMID: UUID? {
+        let args = ProcessInfo.processInfo.arguments
+        guard args.count > 1 else { return nil }
+        return UUID(uuidString: args[1])
+    }
 
     var body: some Scene {
-        WindowGroup {
-            RootView()
-                .frame(minWidth: 800, minHeight: 600)
+        // Main library window
+        Window("Vortex", id: "library") {
+            VMLibraryView()
+                .environment(viewModel)
+                .onAppear {
+                    configureMainWindow()
+                    // If launched with a VM UUID, open its display window.
+                    if let vmID = launchVMID {
+                        Task {
+                            viewModel.loadConfigurations()
+                            await viewModel.bootVM(id: vmID)
+                        }
+                    }
+                }
         }
-        .windowStyle(.titleBar)
-        .defaultSize(width: 1280, height: 800)
+        .defaultSize(width: 900, height: 600)
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                // No "New" menu item -- VMs are created via CLI.
+            }
+
+            CommandGroup(after: .sidebar) {
+                Button("Refresh VM List") {
+                    viewModel.refresh()
+                }
+                .keyboardShortcut("r", modifiers: .command)
+            }
+        }
+
+        // VM display window (opened per-VM)
+        WindowGroup("VM Display", for: UUID.self) { $vmID in
+            if let vmID = vmID {
+                VMDisplayWindow(vmID: vmID)
+                    .environment(viewModel)
+            } else {
+                Text("Invalid VM ID")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .defaultSize(width: 1024, height: 768)
+
+        // Settings window
+        Settings {
+            PreferencesView()
+        }
+    }
+
+    /// Applies dark appearance and window styling after the main window appears.
+    private func configureMainWindow() {
+        // Ensure dark appearance on all windows.
+        DispatchQueue.main.async {
+            for window in NSApp.windows {
+                window.appearance = NSAppearance(named: .darkAqua)
+                window.titlebarAppearsTransparent = true
+                window.backgroundColor = NSColor(
+                    red: 28.0 / 255.0,
+                    green: 28.0 / 255.0,
+                    blue: 30.0 / 255.0,
+                    alpha: 1.0
+                )
+            }
+        }
     }
 }
 
 // MARK: - App Delegate
 
-/// Minimal `NSApplicationDelegate` that ensures the app activates properly
-/// when launched from the terminal.
-final class AppDelegate: NSObject, NSApplicationDelegate {
+/// Handles app lifecycle events: activation, Dock presence, window behavior.
+final class VortexAppDelegate: NSObject, NSApplicationDelegate {
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Required for a CLI-launched binary to show windows and appear in Dock
+        // Appear in the Dock as a proper GUI app.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+
+        // Apply dark appearance globally.
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+
+        // Center the main window at 60% of screen.
+        centerMainWindow()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
-}
 
-// MARK: - Root View
-
-/// Top-level view that either shows the VM display (if a UUID was passed on
-/// the command line) or a simple VM picker list.
-struct RootView: View {
-    @State private var viewModel = RootViewModel()
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                switch viewModel.mode {
-                case .loading:
-                    ProgressView("Loading...")
-                        .navigationTitle("Vortex")
-                case .picker(let configs):
-                    VMPickerView(configs: configs) { config in
-                        viewModel.select(config)
-                    }
-                case .display(let controller):
-                    VMWindowView(controller: controller)
-                case .error(let message):
-                    VStack(spacing: 12) {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.largeTitle)
-                        Text(message)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .navigationTitle("Vortex — Error")
-                }
+    func applicationDidBecomeActive(_ notification: Notification) {
+        // Re-apply dark appearance to any new windows.
+        for window in NSApp.windows {
+            if window.appearance?.name != .darkAqua {
+                window.appearance = NSAppearance(named: .darkAqua)
             }
         }
-        .task {
-            await viewModel.bootstrap()
-        }
-    }
-}
-
-// MARK: - Root View Model
-
-/// Drives the top-level navigation: parse CLI args, load configs, create VM.
-@MainActor
-@Observable
-final class RootViewModel {
-    enum Mode {
-        case loading
-        case picker([VMConfiguration])
-        case display(VMController)
-        case error(String)
     }
 
-    var mode: Mode = .loading
-
-    func bootstrap() async {
-        // Check for a UUID on the command line.
-        let args = ProcessInfo.processInfo.arguments
-        // args[0] is the executable path; args[1] would be the UUID if provided.
-        if args.count > 1, let uuid = UUID(uuidString: args[1]) {
-            await bootVM(id: uuid)
-        } else {
-            await showPicker()
-        }
-    }
-
-    func select(_ config: VMConfiguration) {
-        mode = .loading
-        Task {
-            await bootVM(id: config.id)
-        }
-    }
-
-    private func showPicker() async {
-        let repo = VMRepository()
-        do {
-            let configs = try repo.loadAll()
-            if configs.isEmpty {
-                mode = .error("No VMs found.\nCreate a VM with VortexCLI first.")
-            } else {
-                mode = .picker(configs)
+    /// Centers the key window at approximately 60% of the screen size.
+    private func centerMainWindow() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            guard let window = NSApp.keyWindow ?? NSApp.windows.first,
+                  let screen = window.screen ?? NSScreen.main else {
+                return
             }
-        } catch {
-            mode = .error("Failed to load VMs: \(error.localizedDescription)")
-        }
-    }
 
-    private func bootVM(id: UUID) async {
-        let repo = VMRepository()
-        let manager = VZVMManager()
+            let screenFrame = screen.visibleFrame
+            let width = min(900.0, screenFrame.width * 0.60)
+            let height = min(600.0, screenFrame.height * 0.60)
+            let x = screenFrame.origin.x + (screenFrame.width - width) / 2.0
+            let y = screenFrame.origin.y + (screenFrame.height - height) / 2.0
 
-        do {
-            let config = try repo.load(id: id)
-            let vm = try manager.createVM(config: config)
-            let controller = VMController(
-                vm: vm,
-                manager: manager,
-                config: config
+            window.setFrame(
+                NSRect(x: x, y: y, width: width, height: height),
+                display: true,
+                animate: false
             )
-            mode = .display(controller)
-            // Auto-start after a short delay to let the window appear.
-            try await Task.sleep(for: .milliseconds(200))
-            await controller.start()
-        } catch {
-            mode = .error("Failed to boot VM \(id):\n\(error.localizedDescription)")
-        }
-    }
-}
 
-// MARK: - VM Controller
-
-/// Owns a `VZVirtualMachine` and exposes its state for the UI.
-@MainActor
-@Observable
-final class VMController {
-    let vm: VZVirtualMachine
-    let manager: VZVMManager
-    var config: VMConfiguration
-
-    var stateLabel: String = "Stopped"
-    var isRunning: Bool = false
-    var isPaused: Bool = false
-    var canStart: Bool = true
-    var canStop: Bool = false
-    var errorMessage: String?
-    var showAudioSettings: Bool = false
-
-    private var stateObserver: VZVMStateObserver?
-    private var audioBridge: VsockAudioBridge?
-
-    init(vm: VZVirtualMachine, manager: VZVMManager, config: VMConfiguration) {
-        self.vm = vm
-        self.manager = manager
-        self.config = config
-
-        // Wire up the state observer.
-        if let observer = manager.stateObserver(for: vm) {
-            self.stateObserver = observer
-            observer.onStateChange = { [weak self] state in
-                Task { @MainActor in
-                    self?.updateState(state)
-                }
-            }
-            observer.onError = { [weak self] error in
-                Task { @MainActor in
-                    self?.errorMessage = error.localizedDescription
-                }
-            }
-        }
-    }
-
-    func start() async {
-        guard vm.canStart else { return }
-        stateLabel = "Starting"
-        canStart = false
-        do {
-            try await manager.start(vm)
-            updateFromVZState()
-            // Attach vsock audio bridge after VM starts
-            attachAudioBridge()
-        } catch {
-            errorMessage = error.localizedDescription
-            stateLabel = "Error"
-            canStart = true
-        }
-    }
-
-    func stop() async {
-        guard vm.canRequestStop || vm.canStop else { return }
-        stateLabel = "Stopping"
-        canStop = false
-        audioBridge?.detach()
-        audioBridge = nil
-        do {
-            try await manager.stop(vm)
-            updateFromVZState()
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    private func attachAudioBridge() {
-        let audioConfig = config.audio
-
-        guard audioConfig.enabled else {
-            print("[audio] Audio is disabled in VM config, skipping vsock bridge")
-            return
-        }
-
-        guard audioConfig.output != nil || audioConfig.input != nil else {
-            VortexLog.gui.info("No audio devices configured — open Audio Settings to select devices")
-            return
-        }
-
-        VortexLog.gui.debug("VM socket devices: \(self.vm.socketDevices.count)")
-        for (i, dev) in vm.socketDevices.enumerated() {
-            VortexLog.gui.debug("  device[\(i)]: \(String(describing: type(of: dev)))")
-        }
-
-        let bridge = VsockAudioBridge(vmID: config.id)
-        do {
-            try bridge.attach(to: vm, audioConfig: audioConfig)
-            self.audioBridge = bridge
-            VortexLog.gui.info("Vsock audio bridge attached — output: \(audioConfig.output?.hostDeviceName ?? "none"), input: \(audioConfig.input?.hostDeviceName ?? "none")")
-            VortexLog.gui.info("Listening on vsock port 5198 for guest daemon connection")
-        } catch {
-            VortexLog.gui.error("Failed to attach vsock bridge: \(error)")
-        }
-    }
-
-    /// Persists the current audio config to disk and restarts the audio bridge.
-    ///
-    /// Called by `AudioSettingsView` when the user presses Apply.
-    func applyAudioSettings() {
-        // Persist to config.json.
-        let repo = VMRepository()
-        do {
-            try repo.update(config)
-            print("[audio] Audio config saved for VM \(config.id)")
-        } catch {
-            errorMessage = "Failed to save audio settings: \(error.localizedDescription)"
-            return
-        }
-
-        // Restart the audio bridge with the new config if the VM is running.
-        guard isRunning else { return }
-
-        audioBridge?.detach()
-        audioBridge = nil
-        attachAudioBridge()
-    }
-
-    func pause() async {
-        guard vm.canPause else { return }
-        do {
-            try await manager.pause(vm)
-            updateFromVZState()
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    func resume() async {
-        guard vm.canResume else { return }
-        do {
-            try await manager.resume(vm)
-            updateFromVZState()
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    private func updateState(_ state: VMState) {
-        stateLabel = state.rawValue.capitalized
-        isRunning = (state == .running)
-        isPaused = (state == .paused)
-        canStart = state.canStart
-        canStop = state.canStop
-    }
-
-    private func updateFromVZState() {
-        let vzState = vm.state
-        stateLabel = vzStateName(vzState).capitalized
-        isRunning = (vzState == .running)
-        isPaused = (vzState == .paused)
-        canStart = vm.canStart
-        canStop = vm.canRequestStop || vm.canStop
-    }
-
-    private func vzStateName(_ state: VZVirtualMachine.State) -> String {
-        switch state {
-        case .stopped:   return "stopped"
-        case .running:   return "running"
-        case .paused:    return "paused"
-        case .error:     return "error"
-        case .starting:  return "starting"
-        case .stopping:  return "stopping"
-        case .resuming:  return "resuming"
-        case .pausing:   return "pausing"
-        case .saving:    return "saving"
-        case .restoring: return "restoring"
-        @unknown default: return "unknown"
-        }
-    }
-}
-
-// MARK: - VM Window View
-
-/// The main VM display view with a toolbar for Start/Stop/Pause controls.
-struct VMWindowView: View {
-    @Bindable var controller: VMController
-
-    var body: some View {
-        ZStack {
-            VMDisplayView(vm: controller.vm)
-
-            // Overlay error banner at the bottom if something went wrong.
-            if let error = controller.errorMessage {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.yellow)
-                        Text(error)
-                            .lineLimit(2)
-                        Spacer()
-                        Button("Dismiss") {
-                            controller.errorMessage = nil
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                    .padding(8)
-                    .background(.ultraThinMaterial)
-                }
-            }
-        }
-        .navigationTitle("\(controller.config.identity.name) — \(controller.stateLabel)")
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    controller.showAudioSettings = true
-                } label: {
-                    Label("Audio Settings", systemImage: "speaker.wave.2")
-                }
-
-                if controller.canStart {
-                    Button {
-                        Task { await controller.start() }
-                    } label: {
-                        Label("Start", systemImage: "play.fill")
-                    }
-                }
-
-                if controller.isRunning {
-                    Button {
-                        Task { await controller.pause() }
-                    } label: {
-                        Label("Pause", systemImage: "pause.fill")
-                    }
-                }
-
-                if controller.isPaused {
-                    Button {
-                        Task { await controller.resume() }
-                    } label: {
-                        Label("Resume", systemImage: "play.fill")
-                    }
-                }
-
-                if controller.canStop {
-                    Button {
-                        Task { await controller.stop() }
-                    } label: {
-                        Label("Stop", systemImage: "stop.fill")
-                    }
-                }
-            }
-        }
-        .sheet(isPresented: $controller.showAudioSettings) {
-            AudioSettingsView(
-                audioConfig: $controller.config.audio,
-                onApply: {
-                    controller.applyAudioSettings()
-                    controller.showAudioSettings = false
-                },
-                onDismiss: {
-                    controller.showAudioSettings = false
-                }
+            window.titlebarAppearsTransparent = true
+            window.backgroundColor = NSColor(
+                red: 28.0 / 255.0,
+                green: 28.0 / 255.0,
+                blue: 30.0 / 255.0,
+                alpha: 1.0
             )
         }
-    }
-}
-
-// MARK: - VM Picker View
-
-/// Simple list of available VMs for selection when no UUID is provided.
-struct VMPickerView: View {
-    let configs: [VMConfiguration]
-    let onSelect: (VMConfiguration) -> Void
-
-    var body: some View {
-        List(configs) { config in
-            Button {
-                onSelect(config)
-            } label: {
-                HStack {
-                    Image(systemName: config.identity.iconName ?? "desktopcomputer")
-                        .font(.title2)
-                        .frame(width: 32)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(config.identity.name)
-                            .font(.headline)
-                        Text("\(config.guestOS.rawValue) — \(config.hardware.cpuCoreCount) cores, \(config.hardware.memorySize / (1024*1024*1024)) GB")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Text(config.id.uuidString.prefix(8))
-                        .font(.caption2)
-                        .monospaced()
-                        .foregroundStyle(.tertiary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .padding(.vertical, 4)
-        }
-        .navigationTitle("Select a VM")
     }
 }
