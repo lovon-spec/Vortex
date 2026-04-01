@@ -5,6 +5,7 @@
 // UIDs to AudioDeviceIDs, manages lifecycle, and supports hot-swapping
 // devices while audio is running.
 
+import AudioToolbox
 import CoreAudio
 import Foundation
 import VortexCore
@@ -162,11 +163,18 @@ public final class AudioRouter: @unchecked Sendable {
         // Input.
         if let inputCfg = input {
             let deviceID = try resolveDevice(uid: inputCfg.hostDeviceUID)
+
+            // Negotiate sample rate: try to set the device to our target rate.
+            // If the device won't switch (e.g. BlackHole at 44100 Hz), adapt
+            // and tell AudioInputUnit the actual device rate so it can resample.
+            let deviceRate = negotiateSampleRate(for: deviceID, targetRate: sampleRate)
+
             self.inputUnit = try AudioInputUnit(
                 deviceID: deviceID,
                 sampleRate: sampleRate,
                 channels: channelCount,
-                bitDepth: bitDepth
+                bitDepth: bitDepth,
+                deviceNativeSampleRate: deviceRate
             )
             self.inputConfig = inputCfg
             _activeWatcher?.watchDevice(deviceID: deviceID, uid: inputCfg.hostDeviceUID)
@@ -239,23 +247,27 @@ public final class AudioRouter: @unchecked Sendable {
     /// - Parameter endpoint: New input endpoint configuration.
     public func switchInput(to endpoint: AudioEndpointConfig) throws {
         let deviceID = try resolveDevice(uid: endpoint.hostDeviceUID)
+        let deviceRate = negotiateSampleRate(for: deviceID, targetRate: sampleRate)
 
+        // Always recreate the input unit on device switch so that sample rate
+        // negotiation and converter setup are applied correctly for the new device.
         if let existing = inputUnit {
             if let oldConfig = inputConfig {
                 _activeWatcher?.unwatchDevice(deviceID: existing.deviceID)
                 _ = oldConfig
             }
-            try existing.switchDevice(to: deviceID, restart: isRunning)
-        } else {
-            let unit = try AudioInputUnit(
-                deviceID: deviceID,
-                sampleRate: sampleRate,
-                channels: channelCount,
-                bitDepth: bitDepth
-            )
-            self.inputUnit = unit
-            if isRunning { try unit.start() }
+            existing.stop()
         }
+
+        let unit = try AudioInputUnit(
+            deviceID: deviceID,
+            sampleRate: sampleRate,
+            channels: channelCount,
+            bitDepth: bitDepth,
+            deviceNativeSampleRate: deviceRate
+        )
+        self.inputUnit = unit
+        if isRunning { try unit.start() }
 
         self.inputConfig = endpoint
         _activeWatcher?.watchDevice(deviceID: deviceID, uid: endpoint.hostDeviceUID)
@@ -277,6 +289,161 @@ public final class AudioRouter: @unchecked Sendable {
     /// emulation layer reads from it.
     public var inputRingBuffer: AudioRingBuffer? {
         inputUnit?.ringBuffer
+    }
+
+    // MARK: - Private: sample rate negotiation
+
+    /// Query the available nominal sample rates for a device.
+    ///
+    /// - Parameter deviceID: The device to query.
+    /// - Returns: An array of `AudioValueRange` representing the available
+    ///   nominal sample rates. Each range has `mMinimum == mMaximum` for
+    ///   fixed-rate devices, or spans a continuous range for variable-rate devices.
+    private func availableSampleRates(
+        for deviceID: AudioDeviceID
+    ) -> [AudioValueRange] {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyAvailableNominalSampleRates,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        var dataSize: UInt32 = 0
+        let sizeStatus = AudioObjectGetPropertyDataSize(
+            deviceID, &address, 0, nil, &dataSize
+        )
+        guard sizeStatus == noErr, dataSize > 0 else { return [] }
+
+        let count = Int(dataSize) / MemoryLayout<AudioValueRange>.size
+        var ranges = [AudioValueRange](
+            repeating: AudioValueRange(mMinimum: 0, mMaximum: 0),
+            count: count
+        )
+        let status = AudioObjectGetPropertyData(
+            deviceID, &address, 0, nil, &dataSize, &ranges
+        )
+        guard status == noErr else { return [] }
+        return ranges
+    }
+
+    /// Query the device's current nominal sample rate.
+    ///
+    /// - Parameter deviceID: The device to query.
+    /// - Returns: The current nominal sample rate, or `nil` on failure.
+    private func currentNominalSampleRate(
+        for deviceID: AudioDeviceID
+    ) -> Float64? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        var rate: Float64 = 0
+        var dataSize = UInt32(MemoryLayout<Float64>.size)
+        let status = AudioObjectGetPropertyData(
+            deviceID, &address, 0, nil, &dataSize, &rate
+        )
+        guard status == noErr, rate > 0 else { return nil }
+        return rate
+    }
+
+    /// Attempt to set the device's nominal sample rate.
+    ///
+    /// - Parameters:
+    ///   - rate: The desired sample rate.
+    ///   - deviceID: The device to configure.
+    /// - Returns: `true` if the rate was set successfully.
+    @discardableResult
+    private func setNominalSampleRate(
+        _ rate: Float64,
+        for deviceID: AudioDeviceID
+    ) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        // Check if the property is settable.
+        var settable: DarwinBoolean = false
+        let settableStatus = AudioObjectIsPropertySettable(
+            deviceID, &address, &settable
+        )
+        guard settableStatus == noErr, settable.boolValue else { return false }
+
+        var newRate = rate
+        let status = AudioObjectSetPropertyData(
+            deviceID, &address, 0, nil,
+            UInt32(MemoryLayout<Float64>.size), &newRate
+        )
+        return status == noErr
+    }
+
+    /// Negotiate the best sample rate for a device.
+    ///
+    /// Prefers the target rate (`sampleRate`) if the device supports it.
+    /// Otherwise falls back to the closest available rate.
+    ///
+    /// - Parameters:
+    ///   - deviceID: The device to negotiate with.
+    ///   - targetRate: The desired sample rate.
+    /// - Returns: The actual rate to use (may equal `targetRate` or may
+    ///   be the device's native rate if the target is not supported).
+    private func negotiateSampleRate(
+        for deviceID: AudioDeviceID,
+        targetRate: Float64
+    ) -> Float64 {
+        let ranges = availableSampleRates(for: deviceID)
+
+        // Check whether the target rate falls within any available range.
+        let targetSupported = ranges.contains { range in
+            targetRate >= range.mMinimum && targetRate <= range.mMaximum
+        }
+
+        if targetSupported {
+            // Try to set the device to our target rate.
+            if setNominalSampleRate(targetRate, for: deviceID) {
+                // Verify it actually took.
+                if let actual = currentNominalSampleRate(for: deviceID),
+                   abs(actual - targetRate) < 1.0 {
+                    VortexLog.audio.info(
+                        "[AudioRouter:\(self.vmID)] Device \(deviceID) set to target rate \(targetRate) Hz"
+                    )
+                    return targetRate
+                }
+            }
+        }
+
+        // Target rate not supported or set failed. Use the device's current
+        // nominal rate if available, otherwise find the closest supported rate.
+        if let currentRate = currentNominalSampleRate(for: deviceID), currentRate > 0 {
+            VortexLog.audio.info(
+                "[AudioRouter:\(self.vmID)] Device \(deviceID) target \(targetRate) Hz unavailable, using native \(currentRate) Hz"
+            )
+            return currentRate
+        }
+
+        // Last resort: find the closest fixed rate in the available ranges.
+        var bestRate = targetRate
+        var bestDistance = Double.infinity
+        for range in ranges {
+            // For fixed-rate entries, mMinimum == mMaximum.
+            // For continuous ranges, pick the endpoint closest to target.
+            let candidates = [range.mMinimum, range.mMaximum]
+            for candidate in candidates where candidate > 0 {
+                let distance = abs(candidate - targetRate)
+                if distance < bestDistance {
+                    bestDistance = distance
+                    bestRate = candidate
+                }
+            }
+        }
+
+        VortexLog.audio.info(
+            "[AudioRouter:\(self.vmID)] Device \(deviceID) using closest available rate \(bestRate) Hz (target was \(targetRate) Hz)"
+        )
+        return bestRate
     }
 
     // MARK: - Private: resolution
@@ -358,18 +525,20 @@ public final class AudioRouter: @unchecked Sendable {
             disconnectedInputUID = nil
             do {
                 let newDeviceID = try resolveDevice(uid: deviceUID)
-                if let existing = inputUnit {
-                    try existing.switchDevice(to: newDeviceID, restart: isRunning)
-                } else {
-                    let unit = try AudioInputUnit(
-                        deviceID: newDeviceID,
-                        sampleRate: sampleRate,
-                        channels: channelCount,
-                        bitDepth: bitDepth
-                    )
-                    self.inputUnit = unit
-                    if isRunning { try unit.start() }
-                }
+                let deviceRate = negotiateSampleRate(for: newDeviceID, targetRate: sampleRate)
+
+                // Always recreate on reconnect so rate negotiation is fresh.
+                inputUnit?.stop()
+                let unit = try AudioInputUnit(
+                    deviceID: newDeviceID,
+                    sampleRate: sampleRate,
+                    channels: channelCount,
+                    bitDepth: bitDepth,
+                    deviceNativeSampleRate: deviceRate
+                )
+                self.inputUnit = unit
+                if isRunning { try unit.start() }
+
                 _activeWatcher?.watchDevice(deviceID: newDeviceID, uid: inCfg.hostDeviceUID)
                 onDeviceReconnected?(.input, deviceUID)
             } catch {
