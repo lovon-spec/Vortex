@@ -26,8 +26,14 @@ fi
 # For GUI target, wrap in a .app bundle so macOS grants TCC permissions (microphone, etc.)
 if [ "$TARGET" = "VortexGUI" ]; then
     APP_DIR=".build/Vortex.app/Contents/MacOS"
-    mkdir -p "$APP_DIR"
+    RES_DIR=".build/Vortex.app/Contents/Resources"
+    mkdir -p "$APP_DIR" "$RES_DIR"
     cp "$BIN" "$APP_DIR/VortexGUI"
+
+    # Copy app icon
+    if [ -f "Sources/VortexGUI/Resources/AppIcon.icns" ]; then
+        cp "Sources/VortexGUI/Resources/AppIcon.icns" "$RES_DIR/AppIcon.icns"
+    fi
 
     cat > ".build/Vortex.app/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -46,6 +52,8 @@ if [ "$TARGET" = "VortexGUI" ]; then
     <string>1.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Vortex needs microphone access to capture audio for VM input routing.</string>
     <key>LSUIElement</key>

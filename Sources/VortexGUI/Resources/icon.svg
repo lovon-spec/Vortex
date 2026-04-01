@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1e1e2e"/>
+      <stop offset="100%" stop-color="#11111b"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#89b4fa"/>
+      <stop offset="100%" stop-color="#74c7ec"/>
+    </linearGradient>
+    <linearGradient id="vortexGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#89b4fa"/>
+      <stop offset="50%" stop-color="#b4befe"/>
+      <stop offset="100%" stop-color="#cba6f7"/>
+    </linearGradient>
+    <linearGradient id="waveGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#a6e3a1" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#94e2d5" stop-opacity="0.3"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.45" r="0.35">
+      <stop offset="0%" stop-color="#89b4fa" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#89b4fa" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect x="16" y="16" width="480" height="480" rx="96" fill="url(#bg)"/>
+  <rect x="18" y="18" width="476" height="476" rx="94" fill="none" stroke="#313244" stroke-width="1.5"/>
+
+  <!-- Subtle glow behind the V -->
+  <ellipse cx="256" cy="240" rx="140" ry="160" fill="url(#glow)"/>
+
+  <!-- Vortex spiral rings — concentric arcs suggesting rotation -->
+  <path d="M 150 180 A 120 120 0 0 1 362 180" fill="none" stroke="#45475a" stroke-width="1.5" opacity="0.35"/>
+  <path d="M 170 160 A 100 100 0 0 1 342 160" fill="none" stroke="#585b70" stroke-width="1" opacity="0.25"/>
+  <path d="M 130 200 A 140 140 0 0 1 382 200" fill="none" stroke="#313244" stroke-width="2" opacity="0.3"/>
+
+  <!-- The "V" — elegant serif, centered -->
+  <!-- Left stroke -->
+  <path d="M 160 135 L 256 380 L 260 380 L 168 135 Z" fill="url(#accent)"/>
+  <!-- Right stroke -->
+  <path d="M 344 135 L 252 380 L 256 380 L 352 135 Z" fill="url(#accent)"/>
+  <!-- Left serif -->
+  <rect x="145" y="130" width="40" height="9" rx="3" fill="url(#accent)"/>
+  <!-- Right serif -->
+  <rect x="327" y="130" width="40" height="9" rx="3" fill="url(#accent)"/>
+  <!-- Bottom vertex highlight -->
+  <circle cx="256" cy="382" r="5" fill="#89b4fa" opacity="0.7"/>
+
+  <!-- Audio waveform — three bars emanating right of V -->
+  <path d="M 370 220 Q 385 256, 370 292" fill="none" stroke="url(#waveGrad)" stroke-width="3" stroke-linecap="round"/>
+  <path d="M 388 200 Q 410 256, 388 312" fill="none" stroke="url(#waveGrad)" stroke-width="2.5" stroke-linecap="round" opacity="0.7"/>
+  <path d="M 406 185 Q 434 256, 406 327" fill="none" stroke="url(#waveGrad)" stroke-width="2" stroke-linecap="round" opacity="0.4"/>
+
+  <!-- Audio waveform — three bars emanating left of V (mirror) -->
+  <path d="M 142 220 Q 127 256, 142 292" fill="none" stroke="url(#waveGrad)" stroke-width="3" stroke-linecap="round"/>
+  <path d="M 124 200 Q 102 256, 124 312" fill="none" stroke="url(#waveGrad)" stroke-width="2.5" stroke-linecap="round" opacity="0.7"/>
+  <path d="M 106 185 Q 78 256, 106 327" fill="none" stroke="url(#waveGrad)" stroke-width="2" stroke-linecap="round" opacity="0.4"/>
+
+  <!-- VM dots — three nodes below the V representing VMs -->
+  <line x1="256" y1="400" x2="196" y2="440" stroke="#89b4fa" stroke-width="1.2" opacity="0.25"/>
+  <line x1="256" y1="400" x2="256" y2="445" stroke="#89b4fa" stroke-width="1.2" opacity="0.25"/>
+  <line x1="256" y1="400" x2="316" y2="440" stroke="#89b4fa" stroke-width="1.2" opacity="0.25"/>
+  <circle cx="196" cy="442" r="6" fill="#89b4fa" opacity="0.50"/>
+  <circle cx="256" cy="447" r="6" fill="#b4befe" opacity="0.50"/>
+  <circle cx="316" cy="442" r="6" fill="#cba6f7" opacity="0.50"/>
+
+  <!-- Small speaker icon inside each VM dot -->
+  <rect x="192" y="439" width="4" height="5" rx="0.5" fill="#1e1e2e" opacity="0.7"/>
+  <path d="M 196 439 L 200 437 L 200 446 L 196 444 Z" fill="#1e1e2e" opacity="0.5"/>
+  <rect x="252" y="444" width="4" height="5" rx="0.5" fill="#1e1e2e" opacity="0.7"/>
+  <path d="M 256 444 L 260 442 L 260 451 L 256 449 Z" fill="#1e1e2e" opacity="0.5"/>
+  <rect x="312" y="439" width="4" height="5" rx="0.5" fill="#1e1e2e" opacity="0.7"/>
+  <path d="M 316 439 L 320 437 L 320 446 L 316 444 Z" fill="#1e1e2e" opacity="0.5"/>
+</svg>
