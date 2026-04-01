@@ -67,9 +67,9 @@ PLIST
     echo "[signed] .build/Vortex.app"
 
     if [ $# -gt 0 ]; then
-        open -a ".build/Vortex.app" --args "$@"
+        open "$(pwd)/.build/Vortex.app" --args "$@"
     else
-        open -a ".build/Vortex.app"
+        open "$(pwd)/.build/Vortex.app"
     fi
 else
     codesign --sign - --entitlements Vortex.entitlements --force "$BIN" 2>/dev/null
