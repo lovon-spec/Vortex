@@ -233,16 +233,14 @@ final class VMController {
         let enumerator = AudioDeviceEnumerator()
         let allDevices = (try? enumerator.allDevices()) ?? []
 
+        // Always try to set up audio routing — use config if present, otherwise auto-detect BlackHole
         var audioConfig = config.audio
-        if !audioConfig.enabled {
-            // Enable audio with default BlackHole devices if available
-            audioConfig.enabled = true
-            if let bh16 = allDevices.first(where: { $0.name == "BlackHole 16ch" && $0.isOutput }) {
-                audioConfig.output = AudioEndpointConfig(hostDeviceUID: bh16.uid, hostDeviceName: bh16.name)
-            }
-            if let bh2 = allDevices.first(where: { $0.name == "BlackHole 2ch" && $0.isInput }) {
-                audioConfig.input = AudioEndpointConfig(hostDeviceUID: bh2.uid, hostDeviceName: bh2.name)
-            }
+        audioConfig.enabled = true
+        if audioConfig.output == nil, let bh16 = allDevices.first(where: { $0.name == "BlackHole 16ch" && $0.isOutput }) {
+            audioConfig.output = AudioEndpointConfig(hostDeviceUID: bh16.uid, hostDeviceName: bh16.name)
+        }
+        if audioConfig.input == nil, let bh2 = allDevices.first(where: { $0.name == "BlackHole 2ch" && $0.isInput }) {
+            audioConfig.input = AudioEndpointConfig(hostDeviceUID: bh2.uid, hostDeviceName: bh2.name)
         }
 
         guard audioConfig.output != nil || audioConfig.input != nil else {
