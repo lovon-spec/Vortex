@@ -3,8 +3,14 @@
 #
 # This script is executed by the macOS Installer as root after placing
 # the payload on disk. It:
-#   1. Restarts coreaudiod so the HAL plugin is loaded.
-#   2. Loads the LaunchDaemon plist so the audio daemon starts.
+#   1. Checks if the installed version matches (skip reinstall noise).
+#   2. Stops the old daemon first (so it releases shm).
+#   3. Restarts coreaudiod so the HAL plugin is reloaded.
+#   4. Loads the new LaunchDaemon plist so the daemon starts.
+#
+# Order matters: daemon must stop before coreaudiod restarts (so the
+# daemon doesn't hold stale shm mappings), and coreaudiod must restart
+# before the new daemon starts (so the new HAL plugin creates fresh shm).
 #
 # Exit 0 even if individual steps fail -- a reboot will fix things.
 # The installer shows a failure dialog on non-zero exit, which is
@@ -14,7 +20,43 @@ set -u
 
 PLIST="/Library/LaunchDaemons/com.vortex.audiodaemon.plist"
 DAEMON_LABEL="com.vortex.audiodaemon"
+INSTALLED_VERSION_FILE="/usr/local/share/vortex/VERSION"
 
+# -- Version check --
+# If the installed version matches the package version, skip the
+# restart cycle. The VERSION file was placed by the payload.
+PKG_VERSION=""
+if [[ -f "${INSTALLED_VERSION_FILE}" ]]; then
+    PKG_VERSION="$(tr -d '[:space:]' < "${INSTALLED_VERSION_FILE}")"
+fi
+
+# Check if there's a previously recorded version (from a prior install).
+PREV_VERSION_FILE="/var/run/vortex-prev-version"
+PREV_VERSION=""
+if [[ -f "${PREV_VERSION_FILE}" ]]; then
+    PREV_VERSION="$(tr -d '[:space:]' < "${PREV_VERSION_FILE}")"
+fi
+
+if [[ -n "${PKG_VERSION}" && -n "${PREV_VERSION}" && "${PKG_VERSION}" == "${PREV_VERSION}" ]]; then
+    echo "VortexGuestTools postinstall: version ${PKG_VERSION} already installed, skipping restart."
+    exit 0
+fi
+
+echo "VortexGuestTools postinstall: upgrading${PREV_VERSION:+ from ${PREV_VERSION}} to ${PKG_VERSION:-unknown}"
+
+# -- Step 1: Stop the old daemon --
+echo "VortexGuestTools postinstall: stopping old daemon..."
+
+# Kill the daemon process directly first (fast path).
+killall VortexAudioDaemon 2>/dev/null || true
+
+# Unload the LaunchDaemon so launchd doesn't restart it.
+launchctl bootout system/"${DAEMON_LABEL}" 2>/dev/null || true
+
+# Give the daemon a moment to release shm.
+sleep 1
+
+# -- Step 2: Restart coreaudiod --
 echo "VortexGuestTools postinstall: restarting coreaudiod..."
 
 # Restart coreaudiod so it picks up the new HAL plugin in
@@ -27,10 +69,11 @@ else
     echo "  coreaudiod restarted via killall."
 fi
 
-echo "VortexGuestTools postinstall: loading LaunchDaemon..."
+# Give coreaudiod a moment to start and load the plugin.
+sleep 2
 
-# Unload first in case a previous version was loaded.
-launchctl bootout system/"${DAEMON_LABEL}" 2>/dev/null || true
+# -- Step 3: Load the new daemon --
+echo "VortexGuestTools postinstall: loading new LaunchDaemon..."
 
 # Load the daemon plist. Use bootstrap for modern launchctl.
 if launchctl bootstrap system "${PLIST}" 2>/dev/null; then
@@ -39,6 +82,11 @@ elif launchctl load "${PLIST}" 2>/dev/null; then
     echo "  LaunchDaemon loaded via launchctl load."
 else
     echo "  WARNING: Could not load LaunchDaemon. It will start on next boot."
+fi
+
+# -- Step 4: Record installed version for future upgrade checks --
+if [[ -n "${PKG_VERSION}" ]]; then
+    echo "${PKG_VERSION}" > "${PREV_VERSION_FILE}" 2>/dev/null || true
 fi
 
 echo "VortexGuestTools postinstall: done."

@@ -27,5 +27,13 @@
 
     <key>ThrottleInterval</key>
     <integer>5</integer>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>WatchPaths</key>
+    <array>
+        <string>/Volumes/vortex-tools/audio-port</string>
+    </array>
 </dict>
 </plist>

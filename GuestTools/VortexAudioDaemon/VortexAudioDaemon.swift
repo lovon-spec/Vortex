@@ -39,11 +39,18 @@ import Foundation
 
 // MARK: - Constants
 
-/// The TCP port for Vortex audio transport. Must match host bridge.
-private let VORTEX_AUDIO_PORT: UInt16 = 5198
+/// Default TCP port for Vortex audio transport. Must match host bridge.
+/// Can be overridden by /Volumes/vortex-tools/audio-port or --port flag.
+private let DEFAULT_AUDIO_PORT: UInt16 = 5198
+
+/// Path to the shared folder file containing the host-specified audio port.
+private let AUDIO_PORT_FILE = "/Volumes/vortex-tools/audio-port"
+
+/// Resolved audio port (set during startup from file/arg/default).
+private var resolvedPort: UInt16 = 5198
 
 /// Default host gateway IP for VZ NAT networking.
-/// The guest can override this with --host flag.
+/// Detected automatically from the default route. Falls back to 192.168.64.1.
 private var hostAddress: String = "192.168.64.1"
 
 /// Path to the installed guest tools VERSION file.
@@ -82,13 +89,17 @@ private let SHM_RING_MASK: UInt64 = UInt64(65536 * 2 - 1)
 private let SHM_MAGIC: UInt32 = 0x5658_5348  // "VXSH"
 
 /// Expected version. Must match VORTEX_SHM_VERSION.
-private let SHM_VERSION: UInt32 = 1
+private let SHM_VERSION: UInt32 = 2
 
 /// How long to wait for the HAL plugin to create the shm segment (seconds).
 private let SHM_ATTACH_TIMEOUT: TimeInterval = 30.0
 
-/// Polling interval when waiting for the shm segment to appear.
-private let SHM_ATTACH_POLL_INTERVAL: useconds_t = 500_000  // 0.5s
+/// Initial polling interval when waiting for the shm segment to appear (seconds).
+/// Uses exponential backoff: 0.1, 0.2, 0.4, 0.8, 1.6, capping at 2.0.
+private let SHM_ATTACH_INITIAL_INTERVAL: TimeInterval = 0.1
+
+/// Maximum polling interval for shm attach backoff (seconds).
+private let SHM_ATTACH_MAX_INTERVAL: TimeInterval = 2.0
 
 // MARK: - Protocol Version
 
@@ -143,6 +154,12 @@ final class VortexAudioDaemon {
     /// only lifecycle events (start, stop, connect, disconnect, errors) are logged.
     var verbose: Bool = false
 
+    /// CLI-provided port override (--port), or nil if not specified.
+    var cliPortOverride: UInt16? = nil
+
+    /// Whether the host address was explicitly set via --host.
+    var cliHostOverride: Bool = false
+
     /// The audio format we negotiate with the host.
     private var format: AudioFormat
 
@@ -167,6 +184,10 @@ final class VortexAudioDaemon {
     /// File descriptor for the shm segment (-1 if not open).
     private var shmFD: Int32 = -1
 
+    /// The last observed shm generation counter. Used to detect when the
+    /// HAL plugin has re-created the segment (e.g., coreaudiod restart).
+    private var lastGeneration: UInt32 = 0
+
     // MARK: - Computed shm accessors
 
     /// Typed pointer to the shared state header. Only valid when sharedState != nil.
@@ -183,7 +204,7 @@ final class VortexAudioDaemon {
     //   8: _Atomic uint32_t sampleRate
     //  12: _Atomic uint32_t channels
     //  16: _Atomic uint32_t isActive
-    //  20: uint32_t _reserved0
+    //  20: _Atomic uint32_t generation
     //  24: _Atomic uint64_t outputWritePos
     //  32: _Atomic uint64_t outputReadPos
     //  40: _Atomic uint64_t inputWritePos
@@ -195,6 +216,7 @@ final class VortexAudioDaemon {
     private static let offSampleRate:     Int = 8
     private static let offChannels:       Int = 12
     private static let offIsActive:       Int = 16
+    private static let offGeneration:     Int = 20
     private static let offOutputWritePos: Int = 24
     private static let offOutputReadPos:  Int = 32
     private static let offInputWritePos:  Int = 40
@@ -241,11 +263,39 @@ final class VortexAudioDaemon {
         }
         signal(SIGINT) { _ in }
 
+        // Detect if this is a crash recovery restart by launchd.
+        // launchd sets no special env var, but we can check if we were
+        // spawned shortly after a previous instance crashed.
+        let isCrashRecovery = checkIfCrashRecovery()
+
         let guestToolsVersion = readGuestToolsVersion()
-        log("VortexAudioDaemon starting (format: \(format.sampleRate)Hz, "
-            + "\(format.channels)ch, \(format.bitsPerSample)bit, "
-            + "float=\(format.isFloat), protocol=v\(PROTOCOL_VERSION), "
-            + "tools=\(guestToolsVersion))")
+
+        // Resolve the audio port: file > CLI arg > default.
+        resolvedPort = resolveAudioPort()
+
+        // Detect the host gateway IP if not explicitly set by --host.
+        if hostAddress == "192.168.64.1" && !cliHostOverride {
+            let detected = detectDefaultGateway()
+            if let gw = detected {
+                hostAddress = gw
+                log("Detected default gateway: \(gw)")
+            } else {
+                log("Could not detect default gateway, using fallback \(hostAddress)")
+            }
+        }
+
+        if isCrashRecovery {
+            log("CRASH RECOVERY: VortexAudioDaemon restarting after crash "
+                + "(format: \(format.sampleRate)Hz, \(format.channels)ch, "
+                + "\(format.bitsPerSample)bit, float=\(format.isFloat), "
+                + "protocol=v\(PROTOCOL_VERSION), tools=\(guestToolsVersion), "
+                + "host=\(hostAddress):\(resolvedPort))")
+        } else {
+            log("VortexAudioDaemon starting (format: \(format.sampleRate)Hz, "
+                + "\(format.channels)ch, \(format.bitsPerSample)bit, "
+                + "float=\(format.isFloat), protocol=v\(PROTOCOL_VERSION), "
+                + "tools=\(guestToolsVersion), host=\(hostAddress):\(resolvedPort))")
+        }
 
         // Attach to the HAL plugin's shared memory. This blocks until the
         // plugin creates the segment or the timeout expires.
@@ -253,14 +303,13 @@ final class VortexAudioDaemon {
             log("ERROR: Failed to attach shared memory -- exiting")
             return
         }
-        log("Attached to shared memory '\(SHM_NAME)'")
+        log("Attached to shared memory '\(SHM_NAME)' (gen \(lastGeneration))")
 
         // Read the format from shared memory (the plugin is authoritative).
         updateFormatFromShm()
 
         while shouldRun {
             if connect() {
-                log("Connected to host vsock port \(VORTEX_AUDIO_PORT)")
                 updateFormatFromShm()
                 sendConfigure()
                 sendStart()
@@ -279,6 +328,99 @@ final class VortexAudioDaemon {
         log("VortexAudioDaemon exiting")
     }
 
+    // MARK: - Port Discovery
+
+    /// Resolves the audio port to use, in priority order:
+    /// 1. `/Volumes/vortex-tools/audio-port` (shared folder from host)
+    /// 2. `--port` CLI argument (stored in `cliPortOverride`)
+    /// 3. Default (5198)
+    private func resolveAudioPort() -> UInt16 {
+        // 1. Check shared folder file.
+        if let data = FileManager.default.contents(atPath: AUDIO_PORT_FILE),
+           let str = String(data: data, encoding: .utf8)?
+               .trimmingCharacters(in: .whitespacesAndNewlines),
+           let port = UInt16(str), port > 0 {
+            log("Audio port \(port) read from \(AUDIO_PORT_FILE)")
+            return port
+        }
+
+        // 2. Check CLI argument.
+        if let cliPort = cliPortOverride {
+            log("Audio port \(cliPort) from --port argument")
+            return cliPort
+        }
+
+        // 3. Default.
+        log("Audio port \(DEFAULT_AUDIO_PORT) (default)")
+        return DEFAULT_AUDIO_PORT
+    }
+
+    // MARK: - Gateway Detection
+
+    /// Detects the default gateway IP address by parsing `route -n get default`.
+    ///
+    /// Returns the gateway IP string, or `nil` if detection fails.
+    private func detectDefaultGateway() -> String? {
+        // Use route -n get default to find the gateway.
+        let pipe = Pipe()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/route")
+        process.arguments = ["-n", "get", "default"]
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            logVerbose("route command failed: \(error)")
+            return nil
+        }
+
+        guard process.terminationStatus == 0 else {
+            logVerbose("route exited with status \(process.terminationStatus)")
+            return nil
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+
+        // Parse: look for "gateway: <IP>" line.
+        for line in output.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("gateway:") {
+                let gw = trimmed.dropFirst("gateway:".count)
+                    .trimmingCharacters(in: .whitespaces)
+                // Validate it looks like an IPv4 address.
+                var addr = in_addr()
+                if inet_pton(AF_INET, gw, &addr) == 1 {
+                    return gw
+                }
+            }
+        }
+
+        return nil
+    }
+
+    // MARK: - Crash Recovery Detection
+
+    /// Checks if this appears to be a launchd restart after a crash.
+    /// Heuristic: if our log file exists and the last line mentions an error
+    /// or was within the last 30 seconds, this is likely a crash recovery.
+    private func checkIfCrashRecovery() -> Bool {
+        // Simple heuristic: check if our PID > 1 and the log file already
+        // has recent content (meaning a prior instance existed).
+        let logPath = "/var/log/vortex-audio.log"
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: logPath),
+              let modDate = attrs[.modificationDate] as? Date else {
+            return false
+        }
+        // If the log was modified within the last 30 seconds, likely a restart.
+        return Date().timeIntervalSince(modDate) < 30.0
+    }
+
     // MARK: - Connection
 
     /// Creates a TCP socket and connects to the host bridge.
@@ -295,7 +437,7 @@ final class VortexAudioDaemon {
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = UInt16(VORTEX_AUDIO_PORT).bigEndian
+        addr.sin_port = UInt16(resolvedPort).bigEndian
         guard inet_pton(AF_INET, hostAddress, &addr.sin_addr) == 1 else {
             logVerbose("Invalid host address: \(hostAddress)")
             close(fd)
@@ -309,12 +451,12 @@ final class VortexAudioDaemon {
         }
 
         guard result == 0 else {
-            logVerbose("connect(\(hostAddress):\(VORTEX_AUDIO_PORT)) failed: errno \(errno) (\(errnoString()))")
+            logVerbose("connect(\(hostAddress):\(resolvedPort)) failed: errno \(errno) (\(errnoString()))")
             close(fd)
             return false
         }
 
-        log("Connected to host at \(hostAddress):\(VORTEX_AUDIO_PORT)")
+        log("Connected to host at \(hostAddress):\(resolvedPort)")
         self.socketFD = fd
         return true
     }
@@ -348,12 +490,13 @@ final class VortexAudioDaemon {
             // 2. Validate shared memory is still live (plugin may have
             //    restarted and recreated the segment). If stale, re-attach.
             if !validateSharedMemory() {
-                log("Shared memory stale — re-attaching")
+                log("Shared memory stale (generation or magic changed) — re-attaching")
                 detachSharedMemory()
                 if !attachSharedMemory() {
                     log("Failed to re-attach shared memory — exiting streaming loop")
                     break
                 }
+                log("Re-attached to shared memory (gen \(lastGeneration))")
                 updateFormatFromShm()
                 sendConfigure()
             }
@@ -626,11 +769,13 @@ final class VortexAudioDaemon {
     // MARK: - Shared Memory
 
     /// Attaches to the HAL plugin's shared memory segment. Waits up to
-    /// `SHM_ATTACH_TIMEOUT` for the plugin to create the segment.
+    /// `SHM_ATTACH_TIMEOUT` for the plugin to create the segment, using
+    /// exponential backoff for polling.
     ///
     /// - Returns: `true` if the segment was successfully mapped and validated.
     private func attachSharedMemory() -> Bool {
         let deadline = Date().addingTimeInterval(SHM_ATTACH_TIMEOUT)
+        var backoffInterval = SHM_ATTACH_INITIAL_INTERVAL
 
         while Date() < deadline && shouldRun {
             let fd = vortex_shm_open(SHM_NAME, O_RDWR, 0)
@@ -645,7 +790,8 @@ final class VortexAudioDaemon {
                 if mapped == MAP_FAILED {
                     logVerbose("mmap failed: errno \(errno) (\(errnoString()))")
                     close(fd)
-                    usleep(SHM_ATTACH_POLL_INTERVAL)
+                    usleep(useconds_t(backoffInterval * 1_000_000))
+                    backoffInterval = min(backoffInterval * 2, SHM_ATTACH_MAX_INTERVAL)
                     continue
                 }
 
@@ -654,15 +800,29 @@ final class VortexAudioDaemon {
                 let magic = base.load(fromByteOffset: Self.offMagic, as: UInt32.self)
                 let version = base.load(fromByteOffset: Self.offVersion, as: UInt32.self)
 
-                if magic != SHM_MAGIC || version != SHM_VERSION {
-                    logVerbose("Shared memory validation failed: magic=0x\(String(magic, radix: 16)), "
-                        + "version=\(version) (expected magic=0x\(String(SHM_MAGIC, radix: 16)), "
-                        + "version=\(SHM_VERSION))")
+                if magic != SHM_MAGIC {
+                    logVerbose("Shared memory validation failed: magic=0x\(String(magic, radix: 16)) "
+                        + "(expected 0x\(String(SHM_MAGIC, radix: 16)))")
                     munmap(mapped, expectedSize)
                     close(fd)
-                    usleep(SHM_ATTACH_POLL_INTERVAL)
+                    usleep(useconds_t(backoffInterval * 1_000_000))
+                    backoffInterval = min(backoffInterval * 2, SHM_ATTACH_MAX_INTERVAL)
                     continue
                 }
+
+                if version != SHM_VERSION {
+                    log("WARNING: Shared memory version mismatch: got \(version), expected \(SHM_VERSION). "
+                        + "The HAL plugin and daemon may be different versions.")
+                    munmap(mapped, expectedSize)
+                    close(fd)
+                    usleep(useconds_t(backoffInterval * 1_000_000))
+                    backoffInterval = min(backoffInterval * 2, SHM_ATTACH_MAX_INTERVAL)
+                    continue
+                }
+
+                // Read and store the generation counter.
+                let gen = base.load(fromByteOffset: Self.offGeneration, as: UInt32.self)
+                self.lastGeneration = gen
 
                 self.sharedState = mapped!.assumingMemoryBound(to: UInt8.self)
                 self.shmMappedSize = expectedSize
@@ -671,7 +831,9 @@ final class VortexAudioDaemon {
             }
 
             // shm_open failed -- plugin hasn't created it yet.
-            usleep(SHM_ATTACH_POLL_INTERVAL)
+            logVerbose("shm_open failed: errno \(errno) (\(errnoString())), retrying in \(String(format: "%.1f", backoffInterval))s")
+            usleep(useconds_t(backoffInterval * 1_000_000))
+            backoffInterval = min(backoffInterval * 2, SHM_ATTACH_MAX_INTERVAL)
         }
 
         return false
@@ -691,17 +853,26 @@ final class VortexAudioDaemon {
     }
 
     /// Validates that the shared memory segment is still live by checking
-    /// the magic field. Returns `true` if the magic is correct, meaning
-    /// the segment is the one we expect. Returns `false` if the magic
-    /// does not match (plugin restarted and recreated the segment) or if
-    /// shared memory is not mapped.
+    /// both the magic field and the generation counter. Returns `true` if
+    /// the segment is the same one we attached to. Returns `false` if:
+    ///   - magic doesn't match (segment was destroyed)
+    ///   - generation changed (plugin re-created the segment)
+    ///   - shared memory is not mapped
     ///
     /// This check runs on every streaming loop iteration (every ~5ms),
-    /// so it must be cheap -- a single aligned 4-byte load.
+    /// so it must be cheap -- two aligned 4-byte loads.
     private func validateSharedMemory() -> Bool {
         guard let base = shmBase else { return false }
         let magic = base.load(fromByteOffset: Self.offMagic, as: UInt32.self)
-        return magic == SHM_MAGIC
+        guard magic == SHM_MAGIC else { return false }
+
+        // Check if generation changed (plugin re-created the segment).
+        let gen = base.load(fromByteOffset: Self.offGeneration, as: UInt32.self)
+        if gen != lastGeneration {
+            log("Shared memory generation changed: \(lastGeneration) -> \(gen)")
+            return false
+        }
+        return true
     }
 
     /// Reads the `isActive` flag from shared memory.
@@ -875,6 +1046,8 @@ enum VortexAudioDaemonMain {
         var isFloat = DEFAULT_IS_FLOAT
 
         var verbose = false
+        var cliPort: UInt16? = nil
+        var cliHostSet = false
 
         let args = CommandLine.arguments
         var i = 1
@@ -901,6 +1074,12 @@ enum VortexAudioDaemonMain {
             case "--host":
                 if i + 1 < args.count {
                     hostAddress = args[i + 1]
+                    cliHostSet = true
+                    i += 1
+                }
+            case "--port":
+                if i + 1 < args.count, let val = UInt16(args[i + 1]) {
+                    cliPort = val
                     i += 1
                 }
             case "--verbose", "-v":
@@ -914,7 +1093,9 @@ enum VortexAudioDaemonMain {
                       --channels <N>       Channel count (default: 2)
                       --bits <N>           Bits per sample (default: 32)
                       --int16              Use 16-bit signed integer format
-                      --host <ip>          Host bridge IP (default: 192.168.64.1)
+                      --host <ip>          Host bridge IP (auto-detected, fallback: 192.168.64.1)
+                      --port <N>           Host bridge port (default: read from \
+                    /Volumes/vortex-tools/audio-port, then 5198)
                       --verbose, -v        Enable verbose diagnostic logging
                       --help               Show this help message
                     """)
@@ -932,6 +1113,8 @@ enum VortexAudioDaemonMain {
             isFloat: isFloat
         )
         daemon.verbose = verbose
+        daemon.cliPortOverride = cliPort
+        daemon.cliHostOverride = cliHostSet
         daemon.run()
     }
 }
