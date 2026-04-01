@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "VortexCLI", targets: ["VortexCLI"]),
+        .executable(name: "VortexGUI", targets: ["VortexGUI"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
@@ -198,6 +199,21 @@ let package = Package(
                     "-Xlinker", "-rpath",
                     "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/usr/lib",
                 ]),
+            ]
+        ),
+
+        // MARK: - GUI (minimal VM display app)
+        .executableTarget(
+            name: "VortexGUI",
+            dependencies: [
+                "VortexCore",
+                "VortexPersistence",
+                "VortexVZ",
+            ],
+            path: "Sources/VortexGUI",
+            linkerSettings: [
+                .linkedFramework("Virtualization"),
+                .linkedFramework("AppKit"),
             ]
         ),
 
