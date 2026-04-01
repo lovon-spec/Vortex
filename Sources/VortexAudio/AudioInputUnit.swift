@@ -247,6 +247,23 @@ public final class AudioInputUnit: @unchecked Sendable {
             throw AudioDeviceError.audioUnitError(status, "Set input stream format")
         }
 
+        // 5b. Set the maximum frames per slice to avoid -10863 errors.
+        //     This pre-allocates internal buffers so AudioUnitRender
+        //     doesn't need to allocate on the real-time thread.
+        var maxSlice: UInt32 = 4096
+        status = AudioUnitSetProperty(
+            unit,
+            kAudioUnitProperty_MaximumFramesPerSlice,
+            kAudioUnitScope_Global,
+            0,
+            &maxSlice,
+            UInt32(MemoryLayout<UInt32>.size)
+        )
+        // Non-fatal if this fails — some units ignore it.
+        if status != noErr {
+            print("[AudioInputUnit] Warning: MaximumFramesPerSlice set failed: \(status)")
+        }
+
         // 6. Allocate scratch buffer for the input callback.
         //    We allocate enough for the maximum expected callback size.
         //    4096 frames * channels is a generous upper bound.
