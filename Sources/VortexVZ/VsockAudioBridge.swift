@@ -811,8 +811,15 @@ public final class VsockAudioBridge: @unchecked Sendable {
     ///   - type: The message type.
     ///   - payload: The message payload (may be empty).
     private func sendMessage(type: VsockAudioMessageType, payload: Data) {
-        guard let conn = connection else { return }
-        let fd = conn.fileDescriptor
+        // Use TCP fd if available, otherwise VZ vsock connection
+        let fd: Int32
+        if tcpClientFD >= 0 {
+            fd = tcpClientFD
+        } else if let conn = connection {
+            fd = conn.fileDescriptor
+        } else {
+            return
+        }
 
         var header = Data(capacity: Self.headerSize)
         var typeLE = type.rawValue.littleEndian
