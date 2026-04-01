@@ -13,10 +13,13 @@ fi
 
 swift build 2>&1 | tail -3
 
-# Find the binary — path differs between toolchains
-BIN=$(find .build -name "$TARGET" -type f ! -path "*.build/*" ! -path "*.dSYM/*" ! -name "*.o" ! -name "*.d" 2>/dev/null | while read f; do test -x "$f" && echo "$f"; done | head -1)
-if [ -z "$BIN" ]; then
-    echo "error: $TARGET binary not found after build"
+# Find the binary — check both known SPM output paths
+BIN=".build/debug/$TARGET"
+if [ ! -x "$BIN" ]; then
+    BIN=".build/arm64-apple-macosx/debug/$TARGET"
+fi
+if [ ! -x "$BIN" ]; then
+    echo "error: $TARGET binary not found at .build/debug/ or .build/arm64-apple-macosx/debug/"
     exit 1
 fi
 
