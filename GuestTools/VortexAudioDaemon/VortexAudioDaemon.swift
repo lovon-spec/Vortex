@@ -331,15 +331,28 @@ final class VortexAudioDaemon {
                 break
             }
 
-            // 2. If IO is active, read from shared output ring and send.
+            // 2. Validate shared memory is still live (plugin may have
+            //    restarted and recreated the segment). If stale, re-attach.
+            if !validateSharedMemory() {
+                log("Shared memory stale — re-attaching")
+                detachSharedMemory()
+                if !attachSharedMemory() {
+                    log("Failed to re-attach shared memory — exiting streaming loop")
+                    break
+                }
+                updateFormatFromShm()
+                sendConfigure()
+            }
+
+            // 3. If IO is active, read from shared output ring and send.
             if shmIsActive() {
                 sendOutputDataFromShm()
             }
 
-            // 3. Check for sample rate change in shared memory.
+            // 4. Check for sample rate change in shared memory.
             checkForSampleRateChange()
 
-            // 4. Brief sleep to avoid busy-waiting.
+            // 5. Brief sleep to avoid busy-waiting.
             //    5ms is ~4x per audio callback at 48kHz/1024 frames.
             usleep(5000)
         }
@@ -625,6 +638,20 @@ final class VortexAudioDaemon {
             close(shmFD)
             shmFD = -1
         }
+    }
+
+    /// Validates that the shared memory segment is still live by checking
+    /// the magic field. Returns `true` if the magic is correct, meaning
+    /// the segment is the one we expect. Returns `false` if the magic
+    /// does not match (plugin restarted and recreated the segment) or if
+    /// shared memory is not mapped.
+    ///
+    /// This check runs on every streaming loop iteration (every ~5ms),
+    /// so it must be cheap -- a single aligned 4-byte load.
+    private func validateSharedMemory() -> Bool {
+        guard let base = shmBase else { return false }
+        let magic = base.load(fromByteOffset: Self.offMagic, as: UInt32.self)
+        return magic == SHM_MAGIC
     }
 
     /// Reads the `isActive` flag from shared memory.

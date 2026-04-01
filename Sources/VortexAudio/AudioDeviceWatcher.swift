@@ -18,6 +18,10 @@ public enum AudioDeviceEvent: Sendable {
     /// A specific device that was being watched has disconnected.
     case deviceDisconnected(deviceID: AudioDeviceID, uid: String)
 
+    /// A previously-disconnected device has reappeared on the system.
+    /// The new `AudioDeviceID` may differ from the one used before disconnect.
+    case deviceReappeared(deviceID: AudioDeviceID, uid: String)
+
     /// The system default output device changed. Informational only.
     case defaultOutputChanged(deviceID: AudioDeviceID)
 
@@ -46,6 +50,11 @@ public final class AudioDeviceWatcher: @unchecked Sendable {
 
     /// Device UIDs cached so we can report them on disconnect.
     private var deviceUIDs: [AudioDeviceID: String] = [:]
+
+    /// UIDs of devices that were being watched when they disconnected.
+    /// Checked against the device list on `deviceListChanged` to detect
+    /// reconnection (the device reappearing with a potentially new ID).
+    private var disconnectedUIDs: Set<String> = []
 
     /// Whether global listeners are installed.
     private var isWatching = false
@@ -90,6 +99,7 @@ public final class AudioDeviceWatcher: @unchecked Sendable {
         // Per-device watchers will become no-ops since we clear the set.
         watchedDevices.removeAll()
         deviceUIDs.removeAll()
+        disconnectedUIDs.removeAll()
         isWatching = false
     }
 
@@ -136,7 +146,9 @@ public final class AudioDeviceWatcher: @unchecked Sendable {
             &devicesAddress,
             nil
         ) { [weak self] _, _ in
-            self?.eventHandler(.deviceListChanged)
+            guard let self = self else { return }
+            self.eventHandler(.deviceListChanged)
+            self.checkForReconnectedDevices()
         }
 
         // 2. Default output device changes (informational).
@@ -199,6 +211,10 @@ public final class AudioDeviceWatcher: @unchecked Sendable {
                 let uid = self.deviceUIDs[objectID] ?? "unknown"
                 let wasWatched = self.watchedDevices.remove(objectID) != nil
                 self.deviceUIDs.removeValue(forKey: objectID)
+                // Track the UID so we can detect reconnection later.
+                if wasWatched && uid != "unknown" {
+                    self.disconnectedUIDs.insert(uid)
+                }
                 self.lock.unlock()
 
                 if wasWatched {
@@ -209,6 +225,52 @@ public final class AudioDeviceWatcher: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    // MARK: - Reconnection tracking
+
+    /// Manually register a device UID as disconnected so the watcher will
+    /// emit `.deviceReappeared` when it comes back. Useful when the caller
+    /// knows a device UID should be tracked for reconnection even if the
+    /// alive listener was not installed (e.g., device was already gone at
+    /// configure time).
+    public func trackDisconnectedUID(_ uid: String) {
+        lock.lock()
+        disconnectedUIDs.insert(uid)
+        lock.unlock()
+    }
+
+    /// Scans the current device list for any UIDs previously recorded as
+    /// disconnected. If found, emits `.deviceReappeared` and re-installs
+    /// an alive listener on the new device ID.
+    private func checkForReconnectedDevices() {
+        lock.lock()
+        let pendingUIDs = disconnectedUIDs
+        lock.unlock()
+
+        guard !pendingUIDs.isEmpty else { return }
+
+        for uid in pendingUIDs {
+            if let newDeviceID = resolveDeviceIDForUID(uid) {
+                lock.lock()
+                disconnectedUIDs.remove(uid)
+                watchedDevices.insert(newDeviceID)
+                deviceUIDs[newDeviceID] = uid
+                lock.unlock()
+
+                // Re-install the alive listener on the new device ID.
+                installAliveListener(for: newDeviceID)
+
+                eventHandler(.deviceReappeared(deviceID: newDeviceID, uid: uid))
+            }
+        }
+    }
+
+    /// Resolves a device UID to its current AudioDeviceID using the
+    /// CoreAudio translation property. Returns nil if the device is not
+    /// currently present.
+    private func resolveDeviceIDForUID(_ uid: String) -> AudioDeviceID? {
+        try? enumerator.deviceID(forUID: uid)
     }
 
     // MARK: - Private: property helpers

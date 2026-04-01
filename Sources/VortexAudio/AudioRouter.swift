@@ -68,8 +68,19 @@ public final class AudioRouter: @unchecked Sendable {
     public var bitDepth: UInt32 = 32
 
     /// Callback invoked when a device used by this router disconnects.
+    /// Parameters: direction (.output / .input), device UID.
     public var onDeviceDisconnected: ((_ direction: AudioDirection,
                                        _ uid: String) -> Void)?
+
+    /// Callback invoked when a previously-disconnected device reappears.
+    /// Parameters: direction (.output / .input), device UID.
+    public var onDeviceReconnected: ((_ direction: AudioDirection,
+                                      _ uid: String) -> Void)?
+
+    /// Set of device UIDs that are currently disconnected while this router
+    /// was running. Used to auto-recover when the device reappears.
+    private var disconnectedOutputUID: String?
+    private var disconnectedInputUID: String?
 
     // MARK: - Init / Deinit
 
@@ -82,22 +93,14 @@ public final class AudioRouter: @unchecked Sendable {
         self.vmID = vmID
         self.enumerator = enumerator
 
-        // Create a watcher that forwards disconnect events to this router.
-        var routerRef: AudioRouter?
-        self.watcher = AudioDeviceWatcher(enumerator: enumerator) { [weak routerRef] event in
-            // This closure captures a weak reference that we set below.
-            guard let router = routerRef else { return }
-            router.handleDeviceEvent(event)
+        // Placeholder watcher (needed because `self` is not yet available
+        // during init for a weak capture). Immediately replaced below.
+        self.watcher = AudioDeviceWatcher(enumerator: enumerator) { _ in }
+
+        // Now create the real watcher with a proper weak self capture.
+        let actualWatcher = AudioDeviceWatcher(enumerator: enumerator) { [weak self] event in
+            self?.handleDeviceEvent(event)
         }
-        routerRef = self
-        // Re-create the watcher with a proper weak self capture.
-        // (The initial one captured nil; this is the authoritative one.)
-        let weakRouter = self
-        let actualWatcher = AudioDeviceWatcher(enumerator: enumerator) { [weak weakRouter] event in
-            weakRouter?.handleDeviceEvent(event)
-        }
-        // We need to replace the watcher — but it's let. Work around by
-        // starting the actual watcher. The field watcher is unused for events.
         actualWatcher.startWatching()
         self._activeWatcher = actualWatcher
     }
@@ -280,27 +283,119 @@ public final class AudioRouter: @unchecked Sendable {
         throw AudioDeviceError.deviceNotFound(uid: uid)
     }
 
+    // MARK: - Device disconnect / reconnect
+
+    /// Handle a device disconnect for a specific UID.
+    ///
+    /// Stops the affected AudioUnit and records the UID so that a future
+    /// reconnection can auto-recover. The router remains in the `isRunning`
+    /// state so that reconnection can restart without a full reconfigure.
+    ///
+    /// - Parameter deviceUID: The UID of the device that disconnected.
+    public func handleDeviceDisconnect(deviceUID: String) {
+        if let outCfg = outputConfig, outCfg.hostDeviceUID == deviceUID {
+            print("[AudioRouter:\(vmID)] Output device disconnected: \(deviceUID)")
+            outputUnit?.stop()
+            disconnectedOutputUID = deviceUID
+            onDeviceDisconnected?(.output, deviceUID)
+        }
+        if let inCfg = inputConfig, inCfg.hostDeviceUID == deviceUID {
+            print("[AudioRouter:\(vmID)] Input device disconnected: \(deviceUID)")
+            inputUnit?.stop()
+            disconnectedInputUID = deviceUID
+            onDeviceDisconnected?(.input, deviceUID)
+        }
+    }
+
+    /// Handle a device reconnect for a specific UID.
+    ///
+    /// Re-resolves the UID to a (potentially new) AudioDeviceID,
+    /// reconfigures the affected AudioUnit, and restarts it if the router
+    /// was running before the disconnect.
+    ///
+    /// - Parameter deviceUID: The UID of the device that reappeared.
+    public func handleDeviceReconnect(deviceUID: String) {
+        if disconnectedOutputUID == deviceUID, let outCfg = outputConfig {
+            print("[AudioRouter:\(vmID)] Output device reconnected: \(deviceUID)")
+            disconnectedOutputUID = nil
+            do {
+                let newDeviceID = try resolveDevice(uid: deviceUID)
+                if let existing = outputUnit {
+                    try existing.switchDevice(to: newDeviceID, restart: isRunning)
+                } else {
+                    let unit = try AudioOutputUnit(
+                        deviceID: newDeviceID,
+                        sampleRate: sampleRate,
+                        channels: channelCount,
+                        bitDepth: bitDepth
+                    )
+                    self.outputUnit = unit
+                    if isRunning { try unit.start() }
+                }
+                _activeWatcher?.watchDevice(deviceID: newDeviceID, uid: outCfg.hostDeviceUID)
+                onDeviceReconnected?(.output, deviceUID)
+            } catch {
+                print("[AudioRouter:\(vmID)] Failed to reconnect output device \(deviceUID): \(error)")
+                // Keep the UID tracked so the watcher will try again.
+                disconnectedOutputUID = deviceUID
+                _activeWatcher?.trackDisconnectedUID(deviceUID)
+            }
+        }
+
+        if disconnectedInputUID == deviceUID, let inCfg = inputConfig {
+            print("[AudioRouter:\(vmID)] Input device reconnected: \(deviceUID)")
+            disconnectedInputUID = nil
+            do {
+                let newDeviceID = try resolveDevice(uid: deviceUID)
+                if let existing = inputUnit {
+                    try existing.switchDevice(to: newDeviceID, restart: isRunning)
+                } else {
+                    let unit = try AudioInputUnit(
+                        deviceID: newDeviceID,
+                        sampleRate: sampleRate,
+                        channels: channelCount,
+                        bitDepth: bitDepth
+                    )
+                    self.inputUnit = unit
+                    if isRunning { try unit.start() }
+                }
+                _activeWatcher?.watchDevice(deviceID: newDeviceID, uid: inCfg.hostDeviceUID)
+                onDeviceReconnected?(.input, deviceUID)
+            } catch {
+                print("[AudioRouter:\(vmID)] Failed to reconnect input device \(deviceUID): \(error)")
+                disconnectedInputUID = deviceUID
+                _activeWatcher?.trackDisconnectedUID(deviceUID)
+            }
+        }
+    }
+
+    /// Whether the output device is currently disconnected.
+    public var isOutputDisconnected: Bool {
+        disconnectedOutputUID != nil
+    }
+
+    /// Whether the input device is currently disconnected.
+    public var isInputDisconnected: Bool {
+        disconnectedInputUID != nil
+    }
+
     // MARK: - Private: device events
 
     private func handleDeviceEvent(_ event: AudioDeviceEvent) {
         switch event {
-        case .deviceDisconnected(let deviceID, let uid):
-            if let outUnit = outputUnit, outUnit.deviceID == deviceID {
-                outUnit.stop()
-                onDeviceDisconnected?(.output, uid)
-            }
-            if let inUnit = inputUnit, inUnit.deviceID == deviceID {
-                inUnit.stop()
-                onDeviceDisconnected?(.input, uid)
-            }
+        case .deviceDisconnected(_, let uid):
+            handleDeviceDisconnect(deviceUID: uid)
+
+        case .deviceReappeared(_, let uid):
+            handleDeviceReconnect(deviceUID: uid)
 
         case .deviceListChanged:
-            // Could re-validate that our devices are still present.
-            // For now, the alive listener handles disconnect directly.
+            // Reconnection is handled via .deviceReappeared, which the
+            // watcher emits after checking disconnectedUIDs on list change.
             break
 
         case .defaultOutputChanged, .defaultInputChanged:
-            // Informational only — we never use system defaults.
+            // Informational only — Vortex never uses system defaults.
             break
         }
     }

@@ -179,6 +179,17 @@ public final class VsockAudioBridge: @unchecked Sendable {
     /// Whether the guest has signaled IO is active.
     public private(set) var isStreaming: Bool = false
 
+    /// Set when a host audio device disconnects. Cleared on reconnect.
+    /// Exposed so the VM manager UI can show a warning.
+    public private(set) var deviceDisconnected: Bool = false
+
+    /// Callback invoked on device state changes. Called on an arbitrary
+    /// thread. Parameters: isDisconnected (true=lost, false=recovered),
+    /// direction, device UID.
+    public var onDeviceStateChanged: ((_ disconnected: Bool,
+                                       _ direction: AudioDirection,
+                                       _ uid: String) -> Void)?
+
     /// The active vsock connection from the guest.
     private var connection: VZVirtioSocketConnection?
 
@@ -334,6 +345,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
     /// CoreAudio resources.
     public func detach() {
         isStreaming = false
+        deviceDisconnected = false
 
         inputSendTimer?.cancel()
         inputSendTimer = nil
@@ -377,17 +389,14 @@ public final class VsockAudioBridge: @unchecked Sendable {
     /// Called by the listener when a guest daemon connects.
     ///
     /// Sets up the read loop to process messages from the guest.
+    /// If there is an existing connection, it is torn down gracefully
+    /// (guest daemon restarted or VM rebooted). The router is preserved
+    /// so the new connection can re-use it after a fresh CONFIGURE.
     fileprivate func handleNewConnection(_ conn: VZVirtioSocketConnection) {
-        // If there's an existing connection, close it (guest daemon restarted).
-        if let old = connection {
-            Darwin.close(old.fileDescriptor)
-            router?.stop()
-            router = nil
-            isStreaming = false
-            negotiatedFormat = nil
-        }
-
+        cleanUpExistingConnection()
         self.connection = conn
+
+        print("[audio-tcp] Guest daemon connected via vsock")
 
         // Start the read loop on a dedicated queue.
         readQueue.async { [weak self] in
@@ -397,28 +406,41 @@ public final class VsockAudioBridge: @unchecked Sendable {
 
     /// Called when a guest daemon connects via TCP fallback.
     fileprivate func handleTCPConnection(fd: Int32) {
-        // If there's an existing connection, close it.
-        if let old = connection {
-            Darwin.close(old.fileDescriptor)
-            router?.stop()
-            router = nil
-            isStreaming = false
-            negotiatedFormat = nil
-        }
-        if tcpClientFD >= 0 {
-            Darwin.close(tcpClientFD)
-            router?.stop()
-            router = nil
-            isStreaming = false
-            negotiatedFormat = nil
-        }
-
+        cleanUpExistingConnection()
         self.tcpClientFD = fd
         self.connection = nil
+
+        print("[audio-tcp] Guest daemon connected via TCP")
 
         readQueue.async { [weak self] in
             self?.readLoopFD(fd: fd)
         }
+    }
+
+    /// Tears down the existing guest connection (if any) in preparation
+    /// for a new one. Stops streaming and cleans up I/O state, but
+    /// preserves the router for potential re-use.
+    private func cleanUpExistingConnection() {
+        // Stop streaming and timers.
+        isStreaming = false
+        inputSendTimer?.cancel()
+        inputSendTimer = nil
+        router?.stop()
+
+        // Close the old vsock connection FD.
+        if let old = connection {
+            Darwin.close(old.fileDescriptor)
+            connection = nil
+        }
+
+        // Close the old TCP client FD.
+        if tcpClientFD >= 0 {
+            Darwin.close(tcpClientFD)
+            tcpClientFD = -1
+        }
+
+        // Clear the negotiated format so the new connection must CONFIGURE.
+        negotiatedFormat = nil
     }
 
     /// Raw TCP client file descriptor (when using TCP fallback).
@@ -570,6 +592,9 @@ public final class VsockAudioBridge: @unchecked Sendable {
             return
         }
 
+        // Install device disconnect/reconnect callbacks.
+        installDeviceCallbacks(on: newRouter)
+
         // Replace the previous router.
         router?.stop()
         self.router = newRouter
@@ -695,13 +720,54 @@ public final class VsockAudioBridge: @unchecked Sendable {
     }
 
     /// Called when the guest connection drops (daemon exit, guest reboot).
+    ///
+    /// Stops streaming and cleans up the connection state, but preserves
+    /// the router and audio config so a reconnecting guest daemon can
+    /// resume without a full teardown.
     private func handleDisconnect() {
+        print("[audio-tcp] Guest connection dropped (daemon exit or guest reboot)")
         isStreaming = false
         inputSendTimer?.cancel()
         inputSendTimer = nil
+        // Stop the router but do NOT destroy it — the guest daemon will
+        // reconnect and send a new CONFIGURE+START sequence.
         router?.stop()
-        connection = nil
+
+        // Close the file descriptors.
+        if let conn = connection {
+            Darwin.close(conn.fileDescriptor)
+            connection = nil
+        }
+        if tcpClientFD >= 0 {
+            Darwin.close(tcpClientFD)
+            tcpClientFD = -1
+        }
+
         negotiatedFormat = nil
+    }
+
+    // MARK: - Device Hot-Swap
+
+    /// Installs disconnect/reconnect callbacks on the AudioRouter so the
+    /// bridge can react to host audio device removal and re-appearance.
+    private func installDeviceCallbacks(on router: VortexAudio.AudioRouter) {
+        router.onDeviceDisconnected = { [weak self] direction, uid in
+            guard let self = self else { return }
+            print("[audio-tcp] Host audio device disconnected: \(uid) (\(direction.rawValue))")
+            self.deviceDisconnected = true
+            self.onDeviceStateChanged?(true, direction, uid)
+        }
+
+        router.onDeviceReconnected = { [weak self] direction, uid in
+            guard let self = self else { return }
+            print("[audio-tcp] Host audio device reconnected: \(uid) (\(direction.rawValue))")
+            // Check if both directions are now OK.
+            let router = self.router
+            let stillDisconnected = (router?.isOutputDisconnected ?? false)
+                || (router?.isInputDisconnected ?? false)
+            self.deviceDisconnected = stillDisconnected
+            self.onDeviceStateChanged?(false, direction, uid)
+        }
     }
 
     // MARK: - Input Capture (host -> guest)
