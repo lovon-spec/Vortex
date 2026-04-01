@@ -376,7 +376,9 @@ public final class VsockAudioBridge: @unchecked Sendable {
         //      /Volumes/My Shared Files/<tag>/audio-port
         //   2. Fall back to a --port CLI argument
         //   3. Fall back to 5198 as last resort
-        startTCPListener(requestedPort: audioConfig.bridgePort)
+        // Use configured port, or default to 5198 for backward compatibility.
+        // Port 0 (OS-assigned) requires port file discovery on the guest side.
+        startTCPListener(requestedPort: audioConfig.bridgePort ?? UInt16(Self.audioPort))
 
         isAttached = true
     }
