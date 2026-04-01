@@ -37,6 +37,8 @@ struct VortexGUIApp: App {
 /// when launched from the terminal.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Required for a CLI-launched binary to show windows and appear in Dock
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
     }
 
