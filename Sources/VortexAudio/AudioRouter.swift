@@ -67,6 +67,15 @@ public final class AudioRouter: @unchecked Sendable {
     /// Bit depth — 16 for Int16, 32 for Float32 (default 32).
     public var bitDepth: UInt32 = 32
 
+    /// Optional latency collector for the output path. When set, it is
+    /// forwarded to the `AudioOutputUnit` so the render callback can
+    /// record timing samples.
+    public var latencyCollector: LatencyCollector? {
+        didSet {
+            outputUnit?.latencyCollector = latencyCollector
+        }
+    }
+
     /// Callback invoked when a device used by this router disconnects.
     public var onDeviceDisconnected: ((_ direction: AudioDirection,
                                        _ uid: String) -> Void)?
@@ -132,12 +141,14 @@ public final class AudioRouter: @unchecked Sendable {
         // Output.
         if let outputCfg = output {
             let deviceID = try resolveDevice(uid: outputCfg.hostDeviceUID)
-            self.outputUnit = try AudioOutputUnit(
+            let unit = try AudioOutputUnit(
                 deviceID: deviceID,
                 sampleRate: sampleRate,
                 channels: channelCount,
                 bitDepth: bitDepth
             )
+            unit.latencyCollector = latencyCollector
+            self.outputUnit = unit
             self.outputConfig = outputCfg
             _activeWatcher?.watchDevice(deviceID: deviceID, uid: outputCfg.hostDeviceUID)
         } else {
