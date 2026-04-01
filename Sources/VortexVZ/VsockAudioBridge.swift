@@ -737,6 +737,11 @@ public final class VsockAudioBridge: @unchecked Sendable {
     /// Reads available captured audio from the input ring buffer and
     /// sends it to the guest.
     private func sendInputCapture() {
+        inputCaptureCount += 1
+        if inputCaptureCount <= 5 || inputCaptureCount % 500 == 0 {
+            print("[audio-tcp] Input poll #\(inputCaptureCount): streaming=\(isStreaming), router=\(router != nil), format=\(negotiatedFormat != nil), scratch=\(inputScratchBuffer != nil), inputRB=\(router?.inputRingBuffer != nil)")
+        }
+
         guard isStreaming,
               let ringBuffer = router?.inputRingBuffer,
               let format = negotiatedFormat,
@@ -744,12 +749,10 @@ public final class VsockAudioBridge: @unchecked Sendable {
             return
         }
 
-        inputCaptureCount += 1
-        if inputCaptureCount <= 5 || inputCaptureCount % 500 == 0 {
-            print("[audio-tcp] Input poll #\(inputCaptureCount): avail=\(ringBuffer.framesAvailableForRead) frames")
-        }
-
         let available = ringBuffer.framesAvailableForRead
+        if inputCaptureCount <= 5 || (available > 0 && inputCaptureCount % 100 == 0) {
+            print("[audio-tcp] Input avail: \(available) frames")
+        }
         guard available > 0 else { return }
 
         // Read up to what we have scratch space for.
