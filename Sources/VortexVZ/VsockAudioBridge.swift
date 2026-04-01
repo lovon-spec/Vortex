@@ -289,6 +289,16 @@ public final class VsockAudioBridge: @unchecked Sendable {
     private var inputScratchBuffer: UnsafeMutablePointer<Float>?
     private var inputScratchCapacity: Int = 0
 
+    /// Pre-allocated buffer for Int16-to-Float32 conversion in handlePCMOutput.
+    /// Only allocated when bitsPerSample == 16.
+    private var outputConversionBuffer: UnsafeMutablePointer<Float>?
+    private var outputConversionCapacity: Int = 0
+
+    /// Pre-allocated buffer for Float32-to-Int16 conversion in sendInputCapture.
+    /// Only allocated when bitsPerSample == 16.
+    private var inputConversionBuffer: UnsafeMutablePointer<Int16>?
+    private var inputConversionCapacity: Int = 0
+
     /// The audio config from the Vortex VM configuration.
     private var audioConfig: AudioConfig?
 
@@ -516,6 +526,18 @@ public final class VsockAudioBridge: @unchecked Sendable {
             inputScratchCapacity = 0
         }
 
+        if let buf = outputConversionBuffer {
+            buf.deallocate()
+            outputConversionBuffer = nil
+            outputConversionCapacity = 0
+        }
+
+        if let buf = inputConversionBuffer {
+            buf.deallocate()
+            inputConversionBuffer = nil
+            inputConversionCapacity = 0
+        }
+
         router?.stop()
         router = nil
 
@@ -561,7 +583,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
         cleanUpExistingConnection()
         self.connection = conn
 
-        print("[audio-tcp] Guest daemon connected via vsock")
+        VortexLog.bridge.info("Guest daemon connected via vsock")
 
         // Start the read loop on a dedicated queue.
         readQueue.async { [weak self] in
@@ -575,7 +597,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
         self.tcpClientFD = fd
         self.connection = nil
 
-        print("[audio-tcp] Guest daemon connected via TCP")
+        VortexLog.bridge.info("Guest daemon connected via TCP")
 
         readQueue.async { [weak self] in
             self?.readLoopFD(fd: fd)
@@ -724,7 +746,8 @@ public final class VsockAudioBridge: @unchecked Sendable {
         count: Int
     ) -> Int {
         buffer.withUnsafeMutableBufferPointer { buf in
-            readExactlyFromFD(fd, buffer: buf.baseAddress!, count: count)
+            guard let base = buf.baseAddress else { return 0 }
+            return readExactlyFromFD(fd, buffer: base, count: count)
         }
     }
 
@@ -772,9 +795,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
         } else {
             // Legacy daemon: 13-byte CONFIGURE without version field.
             peerVersion = 0
-            print("[audio-tcp] WARNING: Guest daemon sent 13-byte CONFIGURE without "
-                  + "protocol version. Assuming legacy v0 daemon. "
-                  + "Update guest tools for full compatibility.")
+            VortexLog.bridge.warning("Guest daemon sent 13-byte CONFIGURE without protocol version. Assuming legacy v0 daemon. Update guest tools for full compatibility.")
         }
 
         self.peerProtocolVersion = peerVersion
@@ -782,9 +803,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
         // Version compatibility check: reject if the peer's major version
         // does not match ours and is not the legacy v0.
         if peerVersion != 0 && peerVersion != Self.protocolVersion {
-            print("[audio-tcp] ERROR: Protocol version mismatch — "
-                  + "host=\(Self.protocolVersion), guest=\(peerVersion). "
-                  + "Rejecting connection.")
+            VortexLog.bridge.error("Protocol version mismatch — host=\(Self.protocolVersion), guest=\(peerVersion). Rejecting connection.")
 
             // Determine which fd to close.
             let fd: Int32
@@ -801,9 +820,9 @@ public final class VsockAudioBridge: @unchecked Sendable {
         }
 
         if peerVersion == 0 {
-            print("[audio-tcp] Accepted legacy v0 daemon connection")
+            VortexLog.bridge.info("Accepted legacy v0 daemon connection")
         } else {
-            print("[audio-tcp] Protocol version \(peerVersion) accepted")
+            VortexLog.bridge.info("Protocol version \(peerVersion) accepted")
         }
 
         self.negotiatedFormat = format
@@ -843,6 +862,29 @@ public final class VsockAudioBridge: @unchecked Sendable {
             inputScratchBuffer = .allocate(capacity: scratchSamples)
             inputScratchBuffer?.initialize(repeating: 0.0, count: scratchSamples)
             inputScratchCapacity = scratchSamples
+        }
+
+        // Pre-allocate conversion buffers for Int16 formats.
+        // These avoid per-call heap allocations in handlePCMOutput / sendInputCapture.
+        if !format.isFloat && format.bitsPerSample == 16 {
+            let conversionSamples = 1024 * Int(format.channels)
+
+            if let old = outputConversionBuffer { old.deallocate() }
+            outputConversionBuffer = .allocate(capacity: conversionSamples)
+            outputConversionCapacity = conversionSamples
+
+            if let old = inputConversionBuffer { old.deallocate() }
+            inputConversionBuffer = .allocate(capacity: conversionSamples)
+            inputConversionCapacity = conversionSamples
+        } else {
+            // Not needed for Float32 format — free any stale buffers.
+            if let old = outputConversionBuffer { old.deallocate() }
+            outputConversionBuffer = nil
+            outputConversionCapacity = 0
+
+            if let old = inputConversionBuffer { old.deallocate() }
+            inputConversionBuffer = nil
+            inputConversionCapacity = 0
         }
     }
 
@@ -909,18 +951,15 @@ public final class VsockAudioBridge: @unchecked Sendable {
                 ringBuffer.write(srcBuf, frameCount: frameCount)
             }
         } else if !format.isFloat && format.bitsPerSample == 16 {
-            // Int16 -> Float32 conversion.
+            // Int16 -> Float32 conversion using pre-allocated buffer.
             let sampleCount = frameCount * Int(format.channels)
+            guard let floatBuf = outputConversionBuffer,
+                  sampleCount <= outputConversionCapacity else {
+                return
+            }
             payload.withUnsafeBytes { rawBuf in
                 guard let base = rawBuf.baseAddress else { return }
                 let int16Ptr = base.assumingMemoryBound(to: Int16.self)
-
-                // Use a stack-allocated buffer for small payloads,
-                // otherwise allocate on the heap.
-                let floatBuf = UnsafeMutablePointer<Float>.allocate(
-                    capacity: sampleCount
-                )
-                defer { floatBuf.deallocate() }
 
                 for i in 0..<sampleCount {
                     floatBuf[i] = Float(int16Ptr[i]) / 32768.0
@@ -964,7 +1003,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
     /// the router and audio config so a reconnecting guest daemon can
     /// resume without a full teardown.
     private func handleDisconnect() {
-        print("[audio-tcp] Guest connection dropped (daemon exit or guest reboot)")
+        VortexLog.bridge.info("Guest connection dropped (daemon exit or guest reboot)")
         isStreaming = false
         inputSendTimer?.cancel()
         inputSendTimer = nil
@@ -993,14 +1032,14 @@ public final class VsockAudioBridge: @unchecked Sendable {
     private func installDeviceCallbacks(on router: VortexAudio.AudioRouter) {
         router.onDeviceDisconnected = { [weak self] direction, uid in
             guard let self = self else { return }
-            print("[audio-tcp] Host audio device disconnected: \(uid) (\(direction.rawValue))")
+            VortexLog.bridge.warning("Host audio device disconnected: \(uid) (\(direction.rawValue))")
             self.deviceDisconnected = true
             self.onDeviceStateChanged?(true, direction, uid)
         }
 
         router.onDeviceReconnected = { [weak self] direction, uid in
             guard let self = self else { return }
-            print("[audio-tcp] Host audio device reconnected: \(uid) (\(direction.rawValue))")
+            VortexLog.bridge.info("Host audio device reconnected: \(uid) (\(direction.rawValue))")
             // Check if both directions are now OK.
             let router = self.router
             let stillDisconnected = (router?.isOutputDisconnected ?? false)
@@ -1069,9 +1108,11 @@ public final class VsockAudioBridge: @unchecked Sendable {
             )
             sendMessage(type: .pcmInput, payload: payload)
         } else if !format.isFloat && format.bitsPerSample == 16 {
-            // Float32 -> Int16 conversion.
-            let int16Buf = UnsafeMutablePointer<Int16>.allocate(capacity: samplesRead)
-            defer { int16Buf.deallocate() }
+            // Float32 -> Int16 conversion using pre-allocated buffer.
+            guard let int16Buf = inputConversionBuffer,
+                  samplesRead <= inputConversionCapacity else {
+                return
+            }
 
             for i in 0..<samplesRead {
                 let clamped = max(-1.0, min(1.0, scratch[i]))
