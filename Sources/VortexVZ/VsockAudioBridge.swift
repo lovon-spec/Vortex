@@ -485,12 +485,15 @@ public final class VsockAudioBridge: @unchecked Sendable {
 
             switch msgType {
             case .configure:
+                print("[audio-tcp] Received CONFIGURE (\(payload.count) bytes)")
                 handleConfigure(payload: payload)
             case .pcmOutput:
                 handlePCMOutput(payload: payload)
             case .start:
+                print("[audio-tcp] Received START")
                 handleStart()
             case .stop:
+                print("[audio-tcp] Received STOP")
                 handleStop()
             case .latencyQuery:
                 handleLatencyQuery()
@@ -606,14 +609,26 @@ public final class VsockAudioBridge: @unchecked Sendable {
         router?.stop()
     }
 
+    private var pcmOutputCount: UInt64 = 0
+
     /// Handles PCM_OUTPUT: guest playback data.
     ///
     /// Writes the raw PCM bytes into the output ring buffer, which the
     /// CoreAudio render callback reads from.
     private func handlePCMOutput(payload: Data) {
+        pcmOutputCount += 1
+        if pcmOutputCount == 1 {
+            print("[audio-tcp] First PCM_OUTPUT received: \(payload.count) bytes")
+        } else if pcmOutputCount % 1000 == 0 {
+            print("[audio-tcp] PCM_OUTPUT count: \(pcmOutputCount)")
+        }
+
         guard isStreaming,
               let ringBuffer = router?.outputRingBuffer,
               let format = negotiatedFormat else {
+            if pcmOutputCount <= 3 {
+                print("[audio-tcp] PCM_OUTPUT dropped: streaming=\(isStreaming), router=\(router != nil), format=\(negotiatedFormat != nil)")
+            }
             return
         }
 
