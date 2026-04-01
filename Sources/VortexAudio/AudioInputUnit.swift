@@ -320,9 +320,15 @@ private func inputIOProc(
         let source = UnsafeBufferPointer(start: floatPtr, count: sampleCount)
         let written = inputUnit.ringBuffer.write(source, frameCount: frameCount)
 
-        if cbCount <= 3 || cbCount % 5000 == 0 {
+        if cbCount <= 5 || cbCount % 5000 == 0 {
+            // Check for non-zero audio data
+            var maxAbs: Float = 0
+            for i in 0..<min(sampleCount, 64) {
+                let v = abs(floatPtr[i])
+                if v > maxAbs { maxAbs = v }
+            }
             print("[AudioInputUnit] IOProc #\(cbCount): \(frameCount) frames " +
-                  "(direct), wrote \(written) to ring buffer")
+                  "(direct), wrote \(written), peak=\(maxAbs)")
         }
     } else {
         // Slow path: need format conversion.
