@@ -37,6 +37,9 @@ public final class AudioInputUnit: @unchecked Sendable {
     /// Whether the unit is currently capturing.
     public private(set) var isRunning: Bool = false
 
+    /// Callback invocation counter for diagnostics.
+    var callbackCount: UInt64 = 0
+
     /// The underlying AudioUnit instance.
     fileprivate var audioUnit: AudioUnit?
 
@@ -295,6 +298,11 @@ private func inputRenderCallback(
 ) -> OSStatus {
     let inputUnit = Unmanaged<AudioInputUnit>.fromOpaque(inRefCon)
         .takeUnretainedValue()
+
+    inputUnit.callbackCount += 1
+    if inputUnit.callbackCount <= 3 || inputUnit.callbackCount % 5000 == 0 {
+        print("[AudioInputUnit] callback #\(inputUnit.callbackCount): \(inNumberFrames) frames, bus=\(inBusNumber)")
+    }
 
     guard let audioUnit = inputUnit.audioUnit,
           let scratch = inputUnit.scratchBuffer else {
