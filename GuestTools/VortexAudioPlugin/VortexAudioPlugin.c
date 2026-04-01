@@ -250,7 +250,7 @@ typedef struct {
     AudioServerPlugInHostRef            host;
 
     /* Device state */
-    Float64                             sampleRate;
+    _Atomic(uint64_t)                   sampleRateBits;   /* Float64 via bit-cast; use helpers below */
     UInt32                              ioBufferFrameSize;
     _Atomic(bool)                       ioIsRunning;
     _Atomic(UInt32)                     ioClientCount;  /* number of active IO clients */
@@ -275,6 +275,31 @@ typedef struct {
 
 /* The one and only instance. */
 static VortexDriverState* sDriver = NULL;
+
+/*
+ * Atomic sample-rate accessors.
+ *
+ * Float64 is NOT guaranteed atomic on ARM64 (the ISA only guarantees
+ * atomic loads/stores for naturally-aligned integer types up to 64 bits).
+ * We bit-cast the Float64 to/from a uint64_t and use C11 atomics with
+ * explicit memory ordering to eliminate torn-read risk.
+ */
+static inline void
+VortexAudio_StoreSampleRate(VortexDriverState* s, Float64 rate)
+{
+    uint64_t bits;
+    memcpy(&bits, &rate, sizeof(bits));
+    atomic_store_explicit(&s->sampleRateBits, bits, memory_order_release);
+}
+
+static inline Float64
+VortexAudio_LoadSampleRate(VortexDriverState* s)
+{
+    uint64_t bits = atomic_load_explicit(&s->sampleRateBits, memory_order_acquire);
+    Float64 rate;
+    memcpy(&rate, &bits, sizeof(rate));
+    return rate;
+}
 
 /* Forward declarations of all vtable methods. */
 static HRESULT  VortexAudio_QueryInterface(void* inDriver, REFIID inUUID, LPVOID* outInterface);
@@ -470,7 +495,7 @@ VortexAudio_Create(CFAllocatorRef allocator, CFUUIDRef requestedTypeUUID)
     /* Initial state. */
     atomic_store_explicit(&state->refCount, 1, memory_order_relaxed);
     state->host                 = NULL;
-    state->sampleRate           = kVortexDefaultSampleRate;
+    VortexAudio_StoreSampleRate(state, kVortexDefaultSampleRate);
     state->ioBufferFrameSize    = kDefaultIOBufferFrames;
     atomic_store_explicit(&state->ioIsRunning, false, memory_order_relaxed);
     atomic_store_explicit(&state->ioClientCount, 0, memory_order_relaxed);
@@ -480,7 +505,7 @@ VortexAudio_Create(CFAllocatorRef allocator, CFUUIDRef requestedTypeUUID)
 
     /* Compute timing constants. */
     state->hostTicksPerSecond = VortexAudio_HostTicksPerSecond();
-    Float64 tpf = state->hostTicksPerSecond / state->sampleRate;
+    Float64 tpf = state->hostTicksPerSecond / VortexAudio_LoadSampleRate(state);
     atomic_store_explicit(&state->hostTicksPerFrame, tpf, memory_order_relaxed);
 
     /*
@@ -556,7 +581,7 @@ VortexAudio_Create(CFAllocatorRef allocator, CFUUIDRef requestedTypeUUID)
     VortexSharedAudioState* shared = (VortexSharedAudioState*)mapped;
     atomic_store_explicit(&shared->magic, VORTEX_SHM_MAGIC, memory_order_release);
     atomic_store_explicit(&shared->version, VORTEX_SHM_VERSION, memory_order_release);
-    atomic_store_explicit(&shared->sampleRate, (uint32_t)state->sampleRate, memory_order_release);
+    atomic_store_explicit(&shared->sampleRate, (uint32_t)VortexAudio_LoadSampleRate(state), memory_order_release);
     atomic_store_explicit(&shared->channels, kVortexNumChannels, memory_order_release);
     atomic_store_explicit(&shared->isActive, 0, memory_order_release);
 
@@ -1167,7 +1192,7 @@ VortexAudio_GetPropertyData(AudioServerPlugInDriverRef inDriver,
             return kAudioHardwareNoError;
 
         case kAudioDevicePropertyNominalSampleRate:
-            WRITE_PROPERTY(Float64, state->sampleRate);
+            WRITE_PROPERTY(Float64, VortexAudio_LoadSampleRate(state));
             return kAudioHardwareNoError;
 
         case kAudioDevicePropertyAvailableNominalSampleRates: {
@@ -1243,7 +1268,7 @@ VortexAudio_GetPropertyData(AudioServerPlugInDriverRef inDriver,
         case kAudioStreamPropertyPhysicalFormat: {
             if (inDataSize < sizeof(AudioStreamBasicDescription))
                 return kAudioHardwareBadPropertySizeError;
-            AudioStreamBasicDescription fmt = VortexAudio_MakeStreamFormat(state->sampleRate);
+            AudioStreamBasicDescription fmt = VortexAudio_MakeStreamFormat(VortexAudio_LoadSampleRate(state));
             *((AudioStreamBasicDescription*)outData) = fmt;
             *outDataSize = sizeof(AudioStreamBasicDescription);
             return kAudioHardwareNoError;
@@ -1313,7 +1338,7 @@ VortexAudio_SetPropertyData(AudioServerPlugInDriverRef inDriver,
         }
         if (!valid) return kAudioDeviceUnsupportedFormatError;
 
-        if (newRate != state->sampleRate) {
+        if (newRate != VortexAudio_LoadSampleRate(state)) {
             /*
              * Request a configuration change through the host so it can stop
              * IO and prepare for the rate change. We pass the new rate as the
@@ -1327,7 +1352,7 @@ VortexAudio_SetPropertyData(AudioServerPlugInDriverRef inDriver,
             }
 
             /* Apply the new rate. */
-            state->sampleRate = newRate;
+            VortexAudio_StoreSampleRate(state, newRate);
             Float64 tpf = state->hostTicksPerSecond / newRate;
             atomic_store_explicit(&state->hostTicksPerFrame, tpf, memory_order_release);
 
@@ -1374,8 +1399,8 @@ VortexAudio_SetPropertyData(AudioServerPlugInDriverRef inDriver,
         if (!valid) return kAudioDeviceUnsupportedFormatError;
 
         /* If sample rate changed, apply it. */
-        if (newFmt->mSampleRate != state->sampleRate) {
-            state->sampleRate = newFmt->mSampleRate;
+        if (newFmt->mSampleRate != VortexAudio_LoadSampleRate(state)) {
+            VortexAudio_StoreSampleRate(state, newFmt->mSampleRate);
             Float64 tpf = state->hostTicksPerSecond / newFmt->mSampleRate;
             atomic_store_explicit(&state->hostTicksPerFrame, tpf, memory_order_release);
             if (state->sharedState != NULL) {
@@ -1421,7 +1446,7 @@ VortexAudio_StartIO(AudioServerPlugInDriverRef inDriver,
         /* Signal the daemon that IO is active. */
         if (state->sharedState != NULL) {
             atomic_store_explicit(&state->sharedState->sampleRate,
-                                  (uint32_t)state->sampleRate, memory_order_release);
+                                  (uint32_t)VortexAudio_LoadSampleRate(state), memory_order_release);
             atomic_store_explicit(&state->sharedState->isActive, 1, memory_order_release);
         }
         VLog("VortexAudio_StartIO: IO started (client %u)", inClientID);
@@ -1443,6 +1468,14 @@ VortexAudio_StopIO(AudioServerPlugInDriverRef inDriver,
     }
     if (inDeviceObjectID != kVortexDeviceID) {
         return kAudioHardwareBadDeviceError;
+    }
+
+    /* Guard against underflow: if ioClientCount is already 0, a spurious
+     * StopIO has occurred. Log it and bail out without decrementing. */
+    UInt32 expected = atomic_load_explicit(&state->ioClientCount, memory_order_acquire);
+    if (expected == 0) {
+        VLogError("VortexAudio_StopIO: ioClientCount already 0 -- spurious StopIO (client %u)", inClientID);
+        return kAudioHardwareNotRunningError;
     }
 
     UInt32 prev = atomic_fetch_sub_explicit(&state->ioClientCount, 1, memory_order_acq_rel);
