@@ -160,6 +160,10 @@ final class VortexAudioDaemon {
     /// Whether the host address was explicitly set via --host.
     var cliHostOverride: Bool = false
 
+    /// Optional Unix domain socket path (--socket). When set, the daemon
+    /// connects via AF_UNIX instead of TCP. The wire protocol is identical.
+    var socketPath: String? = nil
+
     /// The audio format we negotiate with the host.
     private var format: AudioFormat
 
@@ -284,17 +288,24 @@ final class VortexAudioDaemon {
             }
         }
 
+        let transportDesc: String
+        if let path = socketPath {
+            transportDesc = "unix:\(path)"
+        } else {
+            transportDesc = "tcp:\(hostAddress):\(resolvedPort)"
+        }
+
         if isCrashRecovery {
             log("CRASH RECOVERY: VortexAudioDaemon restarting after crash "
                 + "(format: \(format.sampleRate)Hz, \(format.channels)ch, "
                 + "\(format.bitsPerSample)bit, float=\(format.isFloat), "
                 + "protocol=v\(PROTOCOL_VERSION), tools=\(guestToolsVersion), "
-                + "host=\(hostAddress):\(resolvedPort))")
+                + "transport=\(transportDesc))")
         } else {
             log("VortexAudioDaemon starting (format: \(format.sampleRate)Hz, "
                 + "\(format.channels)ch, \(format.bitsPerSample)bit, "
                 + "float=\(format.isFloat), protocol=v\(PROTOCOL_VERSION), "
-                + "tools=\(guestToolsVersion), host=\(hostAddress):\(resolvedPort))")
+                + "tools=\(guestToolsVersion), transport=\(transportDesc))")
         }
 
         // Attach to the HAL plugin's shared memory. This blocks until the
@@ -423,10 +434,69 @@ final class VortexAudioDaemon {
 
     // MARK: - Connection
 
-    /// Creates a TCP socket and connects to the host bridge.
+    /// Creates a socket and connects to the peer.
+    ///
+    /// When `socketPath` is set, connects via an `AF_UNIX` domain socket.
+    /// Otherwise, connects via `AF_INET` TCP to `hostAddress:resolvedPort`.
     ///
     /// - Returns: `true` if the connection was established.
     private func connect() -> Bool {
+        if let path = socketPath {
+            return connectUnix(path: path)
+        }
+        return connectTCP()
+    }
+
+    /// Connects to a Unix domain socket at the given path.
+    private func connectUnix(path: String) -> Bool {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            logVerbose("socket(AF_UNIX) failed: errno \(errno) (\(errnoString()))")
+            return false
+        }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+
+        // Copy the path into sun_path, leaving room for the null terminator.
+        let maxLen = MemoryLayout.size(ofValue: addr.sun_path) - 1
+        guard path.utf8.count <= maxLen else {
+            log("ERROR: Socket path too long (\(path.utf8.count) bytes, max \(maxLen))")
+            close(fd)
+            return false
+        }
+
+        withUnsafeMutablePointer(to: &addr.sun_path) { sunPathPtr in
+            sunPathPtr.withMemoryRebound(to: CChar.self, capacity: maxLen + 1) { dst in
+                path.withCString { src in
+                    _ = strncpy(dst, src, maxLen)
+                    dst[path.utf8.count] = 0
+                }
+            }
+        }
+
+        let addrLen = socklen_t(MemoryLayout.offset(of: \sockaddr_un.sun_path)!
+            + path.utf8.count + 1)
+
+        let result = withUnsafePointer(to: &addr) { addrPtr in
+            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.connect(fd, sockPtr, addrLen)
+            }
+        }
+
+        guard result == 0 else {
+            logVerbose("connect(unix:\(path)) failed: errno \(errno) (\(errnoString()))")
+            close(fd)
+            return false
+        }
+
+        log("Connected via Unix socket: \(path)")
+        self.socketFD = fd
+        return true
+    }
+
+    /// Connects via TCP to the host bridge at `hostAddress:resolvedPort`.
+    private func connectTCP() -> Bool {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else {
             logVerbose("socket() failed: errno \(errno) (\(errnoString()))")
@@ -1048,6 +1118,7 @@ enum VortexAudioDaemonMain {
         var verbose = false
         var cliPort: UInt16? = nil
         var cliHostSet = false
+        var cliSocketPath: String? = nil
 
         let args = CommandLine.arguments
         var i = 1
@@ -1082,6 +1153,11 @@ enum VortexAudioDaemonMain {
                     cliPort = val
                     i += 1
                 }
+            case "--socket":
+                if i + 1 < args.count {
+                    cliSocketPath = args[i + 1]
+                    i += 1
+                }
             case "--verbose", "-v":
                 verbose = true
             case "--help":
@@ -1096,6 +1172,7 @@ enum VortexAudioDaemonMain {
                       --host <ip>          Host bridge IP (auto-detected, fallback: 192.168.64.1)
                       --port <N>           Host bridge port (default: read from \
                     /Volumes/vortex-tools/audio-port, then 5198)
+                      --socket <path>      Connect via Unix domain socket instead of TCP
                       --verbose, -v        Enable verbose diagnostic logging
                       --help               Show this help message
                     """)
@@ -1115,6 +1192,7 @@ enum VortexAudioDaemonMain {
         daemon.verbose = verbose
         daemon.cliPortOverride = cliPort
         daemon.cliHostOverride = cliHostSet
+        daemon.socketPath = cliSocketPath
         daemon.run()
     }
 }

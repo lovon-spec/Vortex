@@ -480,11 +480,10 @@ public final class AudioInputUnit: @unchecked Sendable {
                 let source = UnsafeBufferPointer(start: convBase, count: convertedSamples)
                 _ = ringBuffer.write(source, frameCount: convertedFrames)
             } catch {
-                // Conversion failed -- drop this buffer rather than writing
-                // garbage or silence. This should be rare.
-                VortexLog.audio.error(
-                    "AudioInputUnit resample failed: \(error.localizedDescription)"
-                )
+                // Conversion failed -- drop this buffer. No logging here:
+                // this callback runs on a high-priority AudioQueue thread
+                // and os_log may allocate. Set an atomic flag if error
+                // tracking is needed.
             }
         } else {
             // No resampling needed -- write captured data directly.
