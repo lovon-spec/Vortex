@@ -249,7 +249,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
         self.audioConfig = audioConfig
         self.socketDevice = device
 
-        // Set up the listener for incoming guest connections.
+        // Set up the VZ vsock listener for incoming guest connections.
         let delegate = VsockAudioListenerDelegate(bridge: self)
         let listener = VZVirtioSocketListener()
         listener.delegate = delegate
@@ -257,7 +257,69 @@ public final class VsockAudioBridge: @unchecked Sendable {
         self.vsockListener = listener
         self.vsockListenerDelegate = delegate
 
+        // Also start a TCP listener on the same port as fallback.
+        // macOS guests may not support AF_VSOCK from userspace.
+        startTCPListener()
+
         isAttached = true
+    }
+
+    /// TCP server socket for fallback transport.
+    private var tcpListenFD: Int32 = -1
+    private var tcpListenSource: DispatchSourceRead?
+
+    /// Starts a TCP listener on port 5198 bound to 0.0.0.0.
+    private func startTCPListener() {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return }
+
+        var reuse: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(Self.audioPort).bigEndian
+        addr.sin_addr.s_addr = INADDR_ANY.bigEndian
+
+        let bindResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0 else {
+            Darwin.close(fd)
+            return
+        }
+
+        guard listen(fd, 2) == 0 else {
+            Darwin.close(fd)
+            return
+        }
+
+        self.tcpListenFD = fd
+
+        // Accept connections on a dispatch source.
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: readQueue)
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            var clientAddr = sockaddr_in()
+            var clientLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let clientFD = withUnsafeMutablePointer(to: &clientAddr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    accept(fd, $0, &clientLen)
+                }
+            }
+            guard clientFD >= 0 else { return }
+
+            // Disable Nagle for low latency.
+            var noDelay: Int32 = 1
+            setsockopt(clientFD, IPPROTO_TCP, TCP_NODELAY, &noDelay, socklen_t(MemoryLayout<Int32>.size))
+
+            self.handleTCPConnection(fd: clientFD)
+        }
+        source.resume()
+        self.tcpListenSource = source
     }
 
     /// Detaches the bridge, closing any active connection and releasing
@@ -280,6 +342,18 @@ public final class VsockAudioBridge: @unchecked Sendable {
         if let conn = connection {
             Darwin.close(conn.fileDescriptor)
             connection = nil
+        }
+
+        if tcpClientFD >= 0 {
+            Darwin.close(tcpClientFD)
+            tcpClientFD = -1
+        }
+
+        tcpListenSource?.cancel()
+        tcpListenSource = nil
+        if tcpListenFD >= 0 {
+            Darwin.close(tcpListenFD)
+            tcpListenFD = -1
         }
 
         vsockListener = nil
@@ -313,13 +387,47 @@ public final class VsockAudioBridge: @unchecked Sendable {
         }
     }
 
+    /// Called when a guest daemon connects via TCP fallback.
+    fileprivate func handleTCPConnection(fd: Int32) {
+        // If there's an existing connection, close it.
+        if let old = connection {
+            Darwin.close(old.fileDescriptor)
+            router?.stop()
+            router = nil
+            isStreaming = false
+            negotiatedFormat = nil
+        }
+        if tcpClientFD >= 0 {
+            Darwin.close(tcpClientFD)
+            router?.stop()
+            router = nil
+            isStreaming = false
+            negotiatedFormat = nil
+        }
+
+        self.tcpClientFD = fd
+        self.connection = nil
+
+        readQueue.async { [weak self] in
+            self?.readLoopFD(fd: fd)
+        }
+    }
+
+    /// Raw TCP client file descriptor (when using TCP fallback).
+    private var tcpClientFD: Int32 = -1
+
     // MARK: - Read Loop
+
+    /// Main read loop for VZ vsock connections.
+    private func readLoop(connection conn: VZVirtioSocketConnection) {
+        readLoopFD(fd: conn.fileDescriptor)
+    }
 
     /// Main read loop that processes incoming messages from the guest.
     ///
     /// Runs on `readQueue` until the connection closes or an error occurs.
-    private func readLoop(connection conn: VZVirtioSocketConnection) {
-        let fd = conn.fileDescriptor
+    private func readLoopFD(fd: Int32) {
+        let fd = fd
 
         while true {
             // Read the 8-byte header.

@@ -39,15 +39,12 @@ import Foundation
 
 // MARK: - Constants
 
-/// AF_VSOCK address family — matches the macOS/Linux kernel constant.
-/// On macOS 13+, this is defined in <sys/socket.h>.
-private let AF_VSOCK: Int32 = 40
+/// The TCP port for Vortex audio transport. Must match host bridge.
+private let VORTEX_AUDIO_PORT: UInt16 = 5198
 
-/// VMADDR_CID_HOST — the host's well-known CID for vsock.
-private let VMADDR_CID_HOST: UInt32 = 2
-
-/// The well-known vsock port for Vortex audio. Must match VsockAudioBridge.
-private let VORTEX_AUDIO_PORT: UInt32 = 5198
+/// Default host gateway IP for VZ NAT networking.
+/// The guest can override this with --host flag.
+private var hostAddress: String = "192.168.64.1"
 
 /// How long to wait between reconnection attempts (seconds).
 private let RECONNECT_DELAY: TimeInterval = 2.0
@@ -265,36 +262,40 @@ final class VortexAudioDaemon {
 
     // MARK: - Connection
 
-    /// Creates a vsock socket and connects to the host.
+    /// Creates a TCP socket and connects to the host bridge.
     ///
     /// - Returns: `true` if the connection was established.
     private func connect() -> Bool {
-        // Create the socket.
-        let fd = socket(AF_VSOCK, SOCK_STREAM, 0)
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else {
             log("socket() failed: errno \(errno) (\(errnoString()))")
             return false
         }
 
-        // Build the sockaddr_vm.
-        var addr = sockaddr_vm()
-        addr.svm_len = UInt8(MemoryLayout<sockaddr_vm>.size)
-        addr.svm_family = sa_family_t(AF_VSOCK)
-        addr.svm_port = VORTEX_AUDIO_PORT
-        addr.svm_cid = VMADDR_CID_HOST
-
-        let result = withUnsafePointer(to: &addr) { addrPtr in
-            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                Darwin.connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_vm>.size))
-            }
-        }
-
-        guard result == 0 else {
-            log("connect() failed: errno \(errno) (\(errnoString()))")
+        // Resolve host address.
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(VORTEX_AUDIO_PORT).bigEndian
+        guard inet_pton(AF_INET, hostAddress, &addr.sin_addr) == 1 else {
+            log("Invalid host address: \(hostAddress)")
             close(fd)
             return false
         }
 
+        let result = withUnsafePointer(to: &addr) { addrPtr in
+            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+
+        guard result == 0 else {
+            log("connect(\(hostAddress):\(VORTEX_AUDIO_PORT)) failed: errno \(errno) (\(errnoString()))")
+            close(fd)
+            return false
+        }
+
+        log("Connected to host at \(hostAddress):\(VORTEX_AUDIO_PORT)")
         self.socketFD = fd
         return true
     }
@@ -760,18 +761,6 @@ private struct AudioFormat {
     }
 }
 
-// MARK: - sockaddr_vm
-
-/// The vsock address structure. On macOS, this matches the kernel definition.
-/// We define it here because the Darwin module may not expose it in all SDK versions.
-private struct sockaddr_vm {
-    var svm_len: UInt8 = UInt8(MemoryLayout<sockaddr_vm>.size)
-    var svm_family: sa_family_t = sa_family_t(40) // AF_VSOCK
-    var svm_reserved1: UInt16 = 0
-    var svm_port: UInt32 = 0
-    var svm_cid: UInt32 = 0
-}
-
 // MARK: - Entry Point
 
 @main
@@ -805,6 +794,11 @@ enum VortexAudioDaemonMain {
             case "--int16":
                 isFloat = false
                 bitsPerSample = 16
+            case "--host":
+                if i + 1 < args.count {
+                    hostAddress = args[i + 1]
+                    i += 1
+                }
             case "--help":
                 print("""
                     VortexAudioDaemon — Guest-side audio transport for Vortex VMM.
@@ -814,6 +808,7 @@ enum VortexAudioDaemonMain {
                       --channels <N>       Channel count (default: 2)
                       --bits <N>           Bits per sample (default: 32)
                       --int16              Use 16-bit signed integer format
+                      --host <ip>          Host bridge IP (default: 192.168.64.1)
                       --help               Show this help message
                     """)
                 return
