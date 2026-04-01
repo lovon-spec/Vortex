@@ -219,6 +219,11 @@ public final class VsockAudioBridge: @unchecked Sendable {
     /// The audio config from the Vortex VM configuration.
     private var audioConfig: AudioConfig?
 
+    /// Latency instrumentation collector. When non-nil and enabled, the bridge
+    /// records timestamps on PCM_OUTPUT writes and the render callback measures
+    /// the delta. Shared with AudioOutputUnit via the `latencyCollector` property.
+    public var latencyCollector: LatencyCollector?
+
     /// Retains the VZ socket listener and its delegate for the lifetime
     /// of the bridge. Without this, the listener delegate would be released.
     private var vsockListener: VZVirtioSocketListener?
@@ -580,6 +585,7 @@ public final class VsockAudioBridge: @unchecked Sendable {
         newRouter.sampleRate = Float64(format.sampleRate)
         newRouter.channelCount = format.channels
         newRouter.bitDepth = format.bitsPerSample
+        newRouter.latencyCollector = latencyCollector
 
         do {
             try newRouter.configure(
@@ -695,6 +701,9 @@ public final class VsockAudioBridge: @unchecked Sendable {
             }
         }
         // Other formats (e.g. 24-bit) would need additional conversion paths.
+
+        // Latency instrumentation: record the time PCM was written to the ring buffer.
+        latencyCollector?.storeWriteTimestamp()
     }
 
     /// Handles LATENCY_QUERY: responds with the round-trip latency estimate.

@@ -37,6 +37,16 @@ public final class AudioOutputUnit: @unchecked Sendable {
     /// The underlying AudioUnit instance.
     private var audioUnit: AudioUnit?
 
+    /// Optional latency collector for measuring pipeline latency.
+    ///
+    /// When set and enabled, the render callback records timing samples
+    /// by comparing the current `mach_absolute_time()` against the
+    /// timestamp stored by the bridge when PCM data was written.
+    ///
+    /// - Important: The collector must be set BEFORE calling `start()`.
+    ///   Changing it while running has no effect until the next start cycle.
+    public var latencyCollector: LatencyCollector?
+
     // MARK: - Init
 
     /// Creates an output unit routed to a specific device.
@@ -270,6 +280,11 @@ public final class AudioOutputUnit: @unchecked Sendable {
 /// The CoreAudio render callback. Called on the real-time audio thread.
 /// Pulls data from the ring buffer. If not enough data is available,
 /// outputs silence for the missing frames.
+///
+/// When a `LatencyCollector` is attached and enabled, also records a
+/// latency sample: the delta between `mach_absolute_time()` now and the
+/// timestamp the bridge stored when it last wrote PCM into the ring buffer.
+/// This gives the one-way output latency (guest PCM arrival -> host render).
 private func outputRenderCallback(
     inRefCon: UnsafeMutableRawPointer,
     ioActionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
@@ -285,6 +300,17 @@ private func outputRenderCallback(
     let ringBuffer = outputUnit.ringBuffer
     let frameCount = Int(inNumberFrames)
 
+    // Latency instrumentation: capture time before reading from ring buffer.
+    // All operations here are RT-safe (mach_absolute_time is vDSO, atomics
+    // are lock-free, recordSample does only pointer writes).
+    let collector = outputUnit.latencyCollector
+    let renderTime: UInt64
+    if let collector, collector.isEnabled {
+        renderTime = mach_absolute_time()
+    } else {
+        renderTime = 0
+    }
+
     // Get the buffer from the AudioBufferList.
     let bufferList = UnsafeMutableAudioBufferListPointer(ioData)
     guard let firstBuffer = bufferList.first,
@@ -295,6 +321,9 @@ private func outputRenderCallback(
     let totalSamples = frameCount * ringBuffer.channelCount
     let dest = UnsafeMutableBufferPointer(start: dataPtr, count: totalSamples)
 
+    // Snapshot buffer depth BEFORE reading (how many frames were waiting).
+    let bufferDepth = ringBuffer.framesAvailableForRead
+
     let framesRead = ringBuffer.read(dest, frameCount: frameCount)
 
     // Zero-fill any remaining frames (underrun -> silence).
@@ -302,6 +331,18 @@ private func outputRenderCallback(
     if samplesRead < totalSamples {
         dest.baseAddress!.advanced(by: samplesRead)
             .initialize(repeating: 0.0, count: totalSamples - samplesRead)
+    }
+
+    // Record latency sample if instrumentation is active and we read real data.
+    if let collector, renderTime != 0, framesRead > 0 {
+        let writeTime = collector.loadWriteTimestamp()
+        if writeTime != 0 && renderTime > writeTime {
+            let delta = renderTime - writeTime
+            collector.recordSample(
+                ticks: delta,
+                bufferFrames: Int32(clamping: bufferDepth)
+            )
+        }
     }
 
     return noErr
