@@ -589,58 +589,60 @@ final class VortexAudioDaemon {
     ///
     /// - Returns: `false` if the connection was lost.
     private func pollAndReadMessages() -> Bool {
-        var pollFD = pollfd(fd: socketFD, events: Int16(POLLIN), revents: 0)
-        let pollResult = poll(&pollFD, 1, 0) // Non-blocking poll.
+        // Drain ALL available messages to prevent socket buffer backup.
+        // The sender may produce messages faster than our 5ms loop tick.
+        while true {
+            var pollFD = pollfd(fd: socketFD, events: Int16(POLLIN), revents: 0)
+            let pollResult = poll(&pollFD, 1, 0) // Non-blocking poll.
 
-        guard pollResult >= 0 else {
-            return errno == EINTR // Interrupted is OK, other errors are not.
+            guard pollResult >= 0 else {
+                return errno == EINTR
+            }
+
+            guard pollFD.revents & Int16(POLLIN) != 0 else {
+                return true // No more data available.
+            }
+
+            // Check for hangup/error.
+            if pollFD.revents & Int16(POLLHUP | POLLERR) != 0 {
+                return false
+            }
+
+            // Read the header.
+            var headerBuf = [UInt8](repeating: 0, count: 8)
+            let headerRead = readExactly(fd: socketFD, buffer: &headerBuf, count: 8)
+            guard headerRead == 8 else { return false }
+
+            let msgType = headerBuf.withUnsafeBytes { buf -> UInt32 in
+                UInt32(littleEndian: buf.loadUnaligned(fromByteOffset: 0, as: UInt32.self))
+            }
+            let payloadLen = headerBuf.withUnsafeBytes { buf -> UInt32 in
+                UInt32(littleEndian: buf.loadUnaligned(fromByteOffset: 4, as: UInt32.self))
+            }
+
+            // Read payload.
+            var payload = [UInt8]()
+            if payloadLen > 0 && payloadLen <= 8 * 1024 * 1024 {
+                payload = [UInt8](repeating: 0, count: Int(payloadLen))
+                let payloadRead = readExactly(
+                    fd: socketFD, buffer: &payload, count: Int(payloadLen)
+                )
+                guard payloadRead == Int(payloadLen) else { return false }
+            }
+
+            // Dispatch.
+            switch MessageType(rawValue: msgType) {
+            case .pcmInput:
+                handlePCMInput(payload: payload)
+            case .latencyReply:
+                handleLatencyReply(payload: payload)
+            case .versionMismatch:
+                handleVersionMismatch(payload: payload)
+                return false
+            default:
+                break
+            }
         }
-
-        guard pollFD.revents & Int16(POLLIN) != 0 else {
-            return true // No data available, that's fine.
-        }
-
-        // Check for hangup/error.
-        if pollFD.revents & Int16(POLLHUP | POLLERR) != 0 {
-            return false
-        }
-
-        // Read the header.
-        var headerBuf = [UInt8](repeating: 0, count: 8)
-        let headerRead = readExactly(fd: socketFD, buffer: &headerBuf, count: 8)
-        guard headerRead == 8 else { return false }
-
-        let msgType = headerBuf.withUnsafeBytes { buf -> UInt32 in
-            UInt32(littleEndian: buf.loadUnaligned(fromByteOffset: 0, as: UInt32.self))
-        }
-        let payloadLen = headerBuf.withUnsafeBytes { buf -> UInt32 in
-            UInt32(littleEndian: buf.loadUnaligned(fromByteOffset: 4, as: UInt32.self))
-        }
-
-        // Read payload.
-        var payload = [UInt8]()
-        if payloadLen > 0 && payloadLen <= 8 * 1024 * 1024 {
-            payload = [UInt8](repeating: 0, count: Int(payloadLen))
-            let payloadRead = readExactly(
-                fd: socketFD, buffer: &payload, count: Int(payloadLen)
-            )
-            guard payloadRead == Int(payloadLen) else { return false }
-        }
-
-        // Dispatch.
-        switch MessageType(rawValue: msgType) {
-        case .pcmInput:
-            handlePCMInput(payload: payload)
-        case .latencyReply:
-            handleLatencyReply(payload: payload)
-        case .versionMismatch:
-            handleVersionMismatch(payload: payload)
-            return false // Host is closing the connection.
-        default:
-            break // Ignore unknown or irrelevant messages.
-        }
-
-        return true
     }
 
     // MARK: - Message Sending
@@ -1012,6 +1014,8 @@ final class VortexAudioDaemon {
     // MARK: - POSIX I/O Helpers
 
     /// Reads exactly `count` bytes from a file descriptor, handling partial reads.
+    /// On non-blocking sockets, waits up to 100ms per poll for more data to avoid
+    /// busy-spinning on EAGAIN.
     private func readExactly(
         fd: Int32,
         buffer: UnsafeMutablePointer<UInt8>,
@@ -1020,12 +1024,22 @@ final class VortexAudioDaemon {
         var totalRead = 0
         while totalRead < count {
             let n = read(fd, buffer.advanced(by: totalRead), count - totalRead)
-            if n <= 0 {
-                if n < 0 && errno == EINTR { continue }
-                if n < 0 && errno == EAGAIN { continue }
-                break
+            if n > 0 {
+                totalRead += n
+                continue
             }
-            totalRead += n
+            if n < 0 && errno == EINTR { continue }
+            if n < 0 && errno == EAGAIN {
+                // Non-blocking socket has no data yet — wait briefly with poll
+                // instead of spinning. 100ms timeout prevents indefinite stalls.
+                var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                let pr = poll(&pfd, 1, 100)
+                if pr <= 0 || (pfd.revents & Int16(POLLHUP | POLLERR)) != 0 {
+                    break // Timeout or error — return partial read
+                }
+                continue
+            }
+            break // EOF or other error
         }
         return totalRead
     }
