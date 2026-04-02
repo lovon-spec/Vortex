@@ -522,10 +522,10 @@ VortexAudio_Create(CFAllocatorRef allocator, CFUUIDRef requestedTypeUUID)
     uint32_t prevGeneration = 0;
     bool isRecreation = false;
 
-    int shmFD = shm_open(VORTEX_SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0600);
+    int shmFD = shm_open(VORTEX_SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0666);
     if (shmFD < 0 && errno == EEXIST) {
         /* Segment exists from a prior plugin instance. Re-open it. */
-        shmFD = shm_open(VORTEX_SHM_NAME, O_RDWR, 0600);
+        shmFD = shm_open(VORTEX_SHM_NAME, O_RDWR, 0666);
         if (shmFD >= 0) {
             /*
              * Try to read the previous generation from the existing segment
