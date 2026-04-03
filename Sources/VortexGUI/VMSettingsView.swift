@@ -129,6 +129,17 @@ struct VMSettingsView: View {
         }
     }
 
+    private var currentMemoryGiB: Int {
+        max(
+            HardwareProfile.minimumMemoryGiB,
+            Int(editedConfig.hardware.memorySize / HardwareProfile.bytesPerGiB)
+        )
+    }
+
+    private var maxEditableMemoryGiB: Int {
+        max(HardwareProfile.maximumMemoryGiB, currentMemoryGiB)
+    }
+
     // MARK: - Header
 
     private var settingsHeader: some View {
@@ -299,16 +310,15 @@ struct VMSettingsView: View {
                         .font(.subheadline)
                         .fontWeight(.medium)
                     Spacer()
-                    Picker("Memory", selection: Binding(
-                        get: { Int(editedConfig.hardware.memorySize / (1024 * 1024 * 1024)) },
-                        set: { editedConfig.hardware.memorySize = UInt64($0) * 1024 * 1024 * 1024 }
-                    )) {
-                        ForEach([2, 4, 8, 16, 32], id: \.self) { gib in
-                            Text("\(gib) GB").tag(gib)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(width: 120)
+                    Stepper(
+                        "\(currentMemoryGiB) GB",
+                        value: Binding(
+                            get: { currentMemoryGiB },
+                            set: { editedConfig.hardware.memorySize = UInt64($0) * HardwareProfile.bytesPerGiB }
+                        ),
+                        in: HardwareProfile.minimumMemoryGiB...maxEditableMemoryGiB
+                    )
+                    .frame(width: 160)
                     .disabled(isRunning)
                 }
                 .padding(12)

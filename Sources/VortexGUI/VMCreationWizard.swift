@@ -55,7 +55,7 @@ struct VMCreationWizard: View {
 
     // Step 2: Hardware
     @State private var cpuCores: Int = 4
-    @State private var memoryGiB: Int = 8
+    @State private var memoryGiB: Int = min(8, HardwareProfile.maximumMemoryGiB)
     @State private var diskSizeGiB: Int = 64
     @State private var displayPreset: DisplayPreset = .fhd
 
@@ -240,13 +240,12 @@ struct VMCreationWizard: View {
                             .font(.subheadline)
                             .fontWeight(.medium)
                         Spacer()
-                        Picker("Memory", selection: $memoryGiB) {
-                            ForEach(memoryOptions, id: \.self) { gib in
-                                Text("\(gib) GB").tag(gib)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(width: 120)
+                        Stepper(
+                            "\(memoryGiB) GB",
+                            value: $memoryGiB,
+                            in: minMemoryGiB...maxMemoryGiB
+                        )
+                        .frame(width: 160)
                     }
                     .padding(12)
                     .background(.black.opacity(0.2))
@@ -537,8 +536,16 @@ struct VMCreationWizard: View {
         HardwareProfile.maximumCPUCores
     }
 
-    private var memoryOptions: [Int] {
-        [2, 4, 8, 16, 32]
+    private var minMemoryGiB: Int {
+        HardwareProfile.minimumMemoryGiB
+    }
+
+    private var maxMemoryGiB: Int {
+        HardwareProfile.maximumMemoryGiB
+    }
+
+    private func clampedMemoryGiB(_ desired: Int) -> Int {
+        min(max(desired, minMemoryGiB), maxMemoryGiB)
     }
 
     private var audioOutputName: String {
@@ -561,15 +568,15 @@ struct VMCreationWizard: View {
         switch selectedOS {
         case .macOS:
             cpuCores = 4
-            memoryGiB = 8
+            memoryGiB = clampedMemoryGiB(8)
             diskSizeGiB = 64
         case .linuxARM64:
             cpuCores = 4
-            memoryGiB = 4
+            memoryGiB = clampedMemoryGiB(4)
             diskSizeGiB = 32
         case .windowsARM:
             cpuCores = 4
-            memoryGiB = 8
+            memoryGiB = clampedMemoryGiB(8)
             diskSizeGiB = 64
         }
         generateDefaultName()

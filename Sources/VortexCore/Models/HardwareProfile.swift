@@ -6,6 +6,9 @@ import Foundation
 /// CPU and memory allocation for a virtual machine.
 public struct HardwareProfile: Codable, Sendable, Hashable {
 
+    /// One gibibyte in bytes.
+    public static let bytesPerGiB: UInt64 = 1024 * 1024 * 1024
+
     // MARK: - CPU
 
     /// Number of virtual CPU cores allocated to the VM.
@@ -26,7 +29,7 @@ public struct HardwareProfile: Codable, Sendable, Hashable {
     /// Create a hardware profile specifying memory in GiB.
     public init(cpuCoreCount: Int, memoryGiB: UInt64) {
         self.cpuCoreCount = cpuCoreCount
-        self.memorySize = memoryGiB * 1024 * 1024 * 1024
+        self.memorySize = memoryGiB * Self.bytesPerGiB
     }
 
     // MARK: - Constraints
@@ -45,6 +48,16 @@ public struct HardwareProfile: Codable, Sendable, Hashable {
     /// Maximum memory: total physical RAM on the host.
     public static var maximumMemory: UInt64 {
         UInt64(ProcessInfo.processInfo.physicalMemory)
+    }
+
+    /// Minimum memory expressible as whole GiB in the GUI.
+    public static var minimumMemoryGiB: Int {
+        Int((minimumMemory + bytesPerGiB - 1) / bytesPerGiB)
+    }
+
+    /// Maximum memory expressible as whole GiB in the GUI.
+    public static var maximumMemoryGiB: Int {
+        max(minimumMemoryGiB, Int(maximumMemory / bytesPerGiB))
     }
 
     // MARK: - Validation
@@ -79,7 +92,7 @@ public struct HardwareProfile: Codable, Sendable, Hashable {
 
     /// Memory size formatted in human-readable GiB.
     public var memoryGiB: Double {
-        Double(memorySize) / (1024.0 * 1024.0 * 1024.0)
+        Double(memorySize) / Double(Self.bytesPerGiB)
     }
 
     /// Memory size formatted as a display string (e.g. "8 GiB").

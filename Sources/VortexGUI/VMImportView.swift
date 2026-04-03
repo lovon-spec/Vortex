@@ -54,7 +54,7 @@ struct VMImportView: View {
     /// User-configurable VM parameters.
     @State private var vmName: String = "Imported VM"
     @State private var cpuCores: Int = 4
-    @State private var memoryGiB: Int = 8
+    @State private var memoryGiB: Int = min(8, HardwareProfile.maximumMemoryGiB)
 
     /// Progress and error state.
     @State private var isImporting: Bool = false
@@ -63,10 +63,16 @@ struct VMImportView: View {
 
     // MARK: - Constants
 
-    private static let memoryOptions: [Int] = [2, 4, 8, 16, 32]
-
     private var maxCPUCores: Int {
         HardwareProfile.maximumCPUCores
+    }
+
+    private var minMemoryGiB: Int {
+        HardwareProfile.minimumMemoryGiB
+    }
+
+    private var maxMemoryGiB: Int {
+        HardwareProfile.maximumMemoryGiB
     }
 
     private var hasAuxiliaryStorage: Bool {
@@ -373,13 +379,12 @@ struct VMImportView: View {
                     .font(.subheadline)
                     .fontWeight(.medium)
                 Spacer()
-                Picker("Memory", selection: $memoryGiB) {
-                    ForEach(Self.memoryOptions, id: \.self) { gib in
-                        Text("\(gib) GB").tag(gib)
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 120)
+                Stepper(
+                    "\(memoryGiB) GB",
+                    value: $memoryGiB,
+                    in: minMemoryGiB...maxMemoryGiB
+                )
+                .frame(width: 160)
             }
             .padding(12)
             .background(.black.opacity(0.2))
