@@ -5,8 +5,8 @@
 // files (AuxiliaryStorage, hardwareModel.bin, machineIdentifier.bin) near the
 // disk and in UTM config.plist if present, lets the user configure the VM
 // (name, CPU, memory), then creates a VM bundle via VMFileManager, clones the
-// disk with clonefile() + fallback, copies companions, and saves the config
-// via VMRepository.
+// disk with clonefile() + fallback, materializes any embedded UTM macOS
+// identity blobs, copies companions, and saves the config via VMRepository.
 
 import Darwin
 import Foundation
@@ -19,6 +19,22 @@ import VortexPersistence
 /// Sheet view for importing an existing disk image as a new Vortex VM.
 struct VMImportView: View {
 
+    /// A macOS companion can come from a sidecar file or be embedded in UTM's
+    /// config.plist as raw Virtualization.framework data.
+    private enum CompanionSource {
+        case file(URL)
+        case embedded(data: Data, source: URL)
+
+        var displayName: String {
+            switch self {
+            case .file(let url):
+                return url.lastPathComponent
+            case .embedded(_, let source):
+                return "Embedded in \(source.lastPathComponent)"
+            }
+        }
+    }
+
     /// Callback invoked when a VM is successfully imported.
     var onImport: (VMConfiguration) -> Void
 
@@ -30,10 +46,10 @@ struct VMImportView: View {
     /// Path to the selected disk image file.
     @State private var diskImageURL: URL?
 
-    /// Auto-detected companion file paths.
+    /// Auto-detected companion file paths and embedded macOS identity data.
     @State private var auxiliaryStoragePath: URL?
-    @State private var hardwareModelPath: URL?
-    @State private var machineIdentifierPath: URL?
+    @State private var hardwareModelSource: CompanionSource?
+    @State private var machineIdentifierSource: CompanionSource?
 
     /// User-configurable VM parameters.
     @State private var vmName: String = "Imported VM"
@@ -51,6 +67,33 @@ struct VMImportView: View {
 
     private var maxCPUCores: Int {
         HardwareProfile.maximumCPUCores
+    }
+
+    private var hasAuxiliaryStorage: Bool {
+        auxiliaryStoragePath != nil
+    }
+
+    private var hasHardwareModel: Bool {
+        hardwareModelSource != nil
+    }
+
+    private var hasMachineIdentifier: Bool {
+        machineIdentifierSource != nil
+    }
+
+    private var hasAnyMacPlatformArtifact: Bool {
+        hasAuxiliaryStorage || hasHardwareModel || hasMachineIdentifier
+    }
+
+    private var hasCompleteMacPlatformArtifacts: Bool {
+        hasAuxiliaryStorage && hasHardwareModel && hasMachineIdentifier
+    }
+
+    private var canImport: Bool {
+        diskImageURL != nil
+            && !isImporting
+            && !vmName.trimmingCharacters(in: .whitespaces).isEmpty
+            && (!hasAnyMacPlatformArtifact || hasCompleteMacPlatformArtifacts)
     }
 
     // MARK: - Body
@@ -81,6 +124,10 @@ struct VMImportView: View {
                     // Companion files status
                     if diskImageURL != nil {
                         companionFilesSection
+                    }
+
+                    if hasAnyMacPlatformArtifact && !hasCompleteMacPlatformArtifacts {
+                        incompleteMacImportWarning
                     }
 
                     // VM configuration
@@ -136,7 +183,7 @@ struct VMImportView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
-                .disabled(diskImageURL == nil || isImporting || vmName.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(!canImport)
                 .keyboardShortcut(.defaultAction)
             }
             .padding(.horizontal, 24)
@@ -224,17 +271,17 @@ struct VMImportView: View {
             VStack(spacing: 6) {
                 companionRow(
                     label: "AuxiliaryStorage",
-                    url: auxiliaryStoragePath,
+                    source: auxiliaryStoragePath.map { .file($0) },
                     icon: "tray.fill"
                 )
                 companionRow(
                     label: "hardwareModel.bin",
-                    url: hardwareModelPath,
+                    source: hardwareModelSource,
                     icon: "cpu"
                 )
                 companionRow(
                     label: "machineIdentifier.bin",
-                    url: machineIdentifierPath,
+                    source: machineIdentifierSource,
                     icon: "number"
                 )
             }
@@ -244,7 +291,21 @@ struct VMImportView: View {
         }
     }
 
-    private func companionRow(label: String, url: URL?, icon: String) -> some View {
+    private var incompleteMacImportWarning: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.yellow)
+            Text("This looks like a macOS VM, but Vortex needs AuxiliaryStorage, hardware model, and machine identifier to import it safely.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.yellow.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func companionRow(label: String, source: CompanionSource?, icon: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: icon)
                 .font(.caption)
@@ -256,11 +317,11 @@ struct VMImportView: View {
 
             Spacer()
 
-            if let url = url {
+            if let source = source {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.caption)
                     .foregroundStyle(.green)
-                Text(url.lastPathComponent)
+                Text(source.displayName)
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
@@ -371,8 +432,8 @@ struct VMImportView: View {
     /// in a parent .utm bundle.
     private func detectCompanionFiles(near diskURL: URL) {
         auxiliaryStoragePath = nil
-        hardwareModelPath = nil
-        machineIdentifierPath = nil
+        hardwareModelSource = nil
+        machineIdentifierSource = nil
 
         let fm = FileManager.default
 
@@ -396,16 +457,16 @@ struct VMImportView: View {
                     auxiliaryStoragePath = candidate
                 }
             }
-            if hardwareModelPath == nil {
+            if hardwareModelSource == nil {
                 let candidate = dir.appendingPathComponent("hardwareModel.bin")
                 if fm.fileExists(atPath: candidate.path) {
-                    hardwareModelPath = candidate
+                    hardwareModelSource = .file(candidate)
                 }
             }
-            if machineIdentifierPath == nil {
+            if machineIdentifierSource == nil {
                 let candidate = dir.appendingPathComponent("machineIdentifier.bin")
                 if fm.fileExists(atPath: candidate.path) {
-                    machineIdentifierPath = candidate
+                    machineIdentifierSource = .file(candidate)
                 }
             }
         }
@@ -422,12 +483,7 @@ struct VMImportView: View {
         for dir in searchDirs {
             let configPlist = dir.appendingPathComponent("config.plist")
             guard fm.fileExists(atPath: configPlist.path),
-                  let data = try? Data(contentsOf: configPlist),
-                  let plist = try? PropertyListSerialization.propertyList(
-                      from: data,
-                      options: [],
-                      format: nil
-                  ) as? [String: Any] else {
+                  let plist = try? UTMConfigPlist.load(from: configPlist) else {
                 continue
             }
 
@@ -436,7 +492,7 @@ struct VMImportView: View {
 
             // Try known UTM plist keys for auxiliary storage.
             if auxiliaryStoragePath == nil {
-                if let relPath = extractString(from: plist, keyPath: ["Virtualization", "MacAuxiliaryStorage"]) {
+                if let relPath = plist.auxiliaryStorageRelativePath {
                     let candidate = dataDir.appendingPathComponent(relPath)
                     if fm.fileExists(atPath: candidate.path) {
                         auxiliaryStoragePath = candidate
@@ -449,38 +505,38 @@ struct VMImportView: View {
                 }
             }
 
-            if hardwareModelPath == nil {
+            if hardwareModelSource == nil,
+               let hardwareModelData = plist.embeddedHardwareModelData {
+                hardwareModelSource = .embedded(data: hardwareModelData, source: configPlist)
+            }
+
+            if hardwareModelSource == nil {
                 let candidate = dataDir.appendingPathComponent("hardwareModel.bin")
                 if fm.fileExists(atPath: candidate.path) {
-                    hardwareModelPath = candidate
+                    hardwareModelSource = .file(candidate)
                 }
             }
 
-            if machineIdentifierPath == nil {
+            if machineIdentifierSource == nil,
+               let machineIdentifierData = plist.embeddedMachineIdentifierData {
+                machineIdentifierSource = .embedded(data: machineIdentifierData, source: configPlist)
+            }
+
+            if machineIdentifierSource == nil {
                 let candidate = dataDir.appendingPathComponent("machineIdentifier.bin")
                 if fm.fileExists(atPath: candidate.path) {
-                    machineIdentifierPath = candidate
+                    machineIdentifierSource = .file(candidate)
                 }
                 // UTM sometimes names it differently.
                 let altCandidate = dataDir.appendingPathComponent("MachineIdentifier")
-                if machineIdentifierPath == nil && fm.fileExists(atPath: altCandidate.path) {
-                    machineIdentifierPath = altCandidate
+                if machineIdentifierSource == nil && fm.fileExists(atPath: altCandidate.path) {
+                    machineIdentifierSource = .file(altCandidate)
                 }
             }
 
             // If we found the config.plist, no need to keep searching.
             break
         }
-    }
-
-    /// Extracts a string value from a nested dictionary using a key path.
-    private func extractString(from dict: [String: Any], keyPath: [String]) -> String? {
-        guard !keyPath.isEmpty else { return nil }
-        if keyPath.count == 1 {
-            return dict[keyPath[0]] as? String
-        }
-        guard let nested = dict[keyPath[0]] as? [String: Any] else { return nil }
-        return extractString(from: nested, keyPath: Array(keyPath.dropFirst()))
     }
 
     // MARK: - File Size Display
@@ -532,8 +588,14 @@ struct VMImportView: View {
             diskSizeBytes = 64 * 1024 * 1024 * 1024
         }
 
+        if hasAnyMacPlatformArtifact && !hasCompleteMacPlatformArtifacts {
+            importError = "Import failed: incomplete macOS identity. Vortex needs AuxiliaryStorage, hardware model, and machine identifier for a bootable macOS import."
+            isImporting = false
+            return
+        }
+
         // Determine if this is a macOS VM based on companion files.
-        let isMacOS = auxiliaryStoragePath != nil || machineIdentifierPath != nil
+        let isMacOS = hasCompleteMacPlatformArtifacts
 
         let config: VMConfiguration
         if isMacOS {
@@ -597,16 +659,16 @@ struct VMImportView: View {
                 try copyFile(from: auxSource, to: auxDstPath)
             }
 
-            if let hwModelSource = hardwareModelPath {
+            if let hwModelSource = hardwareModelSource {
                 importProgress = "Copying hardware model..."
                 let hwModelDst = fileManager.subdirectoryPath(.auxiliary, for: vmID)
                     .appendingPathComponent("hardwareModel.bin")
-                try copyFile(from: hwModelSource, to: hwModelDst)
+                try persistCompanion(from: hwModelSource, to: hwModelDst)
             }
 
-            if let machineIdSource = machineIdentifierPath {
+            if let machineIdSource = machineIdentifierSource {
                 importProgress = "Copying machine identifier..."
-                try copyFile(from: machineIdSource, to: machineIdDstPath)
+                try persistCompanion(from: machineIdSource, to: machineIdDstPath)
             }
 
             // Step 4: Save the configuration.
@@ -683,6 +745,37 @@ struct VMImportView: View {
         } catch {
             throw VortexError.diskOperationFailed(
                 reason: "Failed to copy \(source.lastPathComponent) to \(destination.path): \(error.localizedDescription)"
+            )
+        }
+    }
+
+    /// Persists a companion artifact to the destination, whether it comes from
+    /// a sidecar file or embedded UTM plist data.
+    private func persistCompanion(from source: CompanionSource, to destination: URL) throws {
+        switch source {
+        case .file(let url):
+            try copyFile(from: url, to: destination)
+        case .embedded(let data, _):
+            try writeData(data, to: destination)
+        }
+    }
+
+    /// Writes raw data to a single file destination.
+    private func writeData(_ data: Data, to destination: URL) throws {
+        let parentDir = destination.deletingLastPathComponent()
+        if !FileManager.default.fileExists(atPath: parentDir.path) {
+            try FileManager.default.createDirectory(
+                at: parentDir,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+        }
+
+        do {
+            try data.write(to: destination, options: .atomic)
+        } catch {
+            throw VortexError.diskOperationFailed(
+                reason: "Failed to write \(destination.lastPathComponent) to \(destination.path): \(error.localizedDescription)"
             )
         }
     }
