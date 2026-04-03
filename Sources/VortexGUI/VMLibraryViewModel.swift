@@ -48,6 +48,9 @@ final class VMLibraryViewModel {
     /// Whether to show the VM creation wizard sheet.
     var showCreationWizard: Bool = false
 
+    /// Whether to show the VM import sheet.
+    var showImportSheet: Bool = false
+
     /// Whether to show the VM settings sheet.
     var showSettings: Bool = false
 
@@ -181,6 +184,17 @@ final class VMLibraryViewModel {
         selectedVMID = config.id
         showCreationWizard = false
         VortexLog.gui.info("VM added to library: \(config.identity.name)")
+    }
+
+    /// Adds an imported VM configuration to the library and selects it.
+    ///
+    /// The configuration and its on-disk bundle are assumed to already exist
+    /// (created by the import sheet). This method refreshes the in-memory list.
+    func addImportedVM(_ config: VMConfiguration) {
+        loadConfigurations()
+        selectedVMID = config.id
+        showImportSheet = false
+        VortexLog.gui.info("VM imported to library: \(config.identity.name)")
     }
 
     // MARK: - Delete

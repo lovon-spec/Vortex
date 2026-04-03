@@ -38,6 +38,16 @@ struct VMLibraryView: View {
                 }
             )
         }
+        .sheet(isPresented: $vm.showImportSheet) {
+            VMImportView(
+                onImport: { config in
+                    viewModel.addImportedVM(config)
+                },
+                onDismiss: {
+                    viewModel.showImportSheet = false
+                }
+            )
+        }
         .sheet(isPresented: $vm.showSettings) {
             if let config = viewModel.selectedConfig {
                 VMSettingsView(
@@ -91,6 +101,15 @@ private struct SidebarView: View {
                 .help("Create a new virtual machine")
 
                 Button {
+                    viewModel.showImportSheet = true
+                } label: {
+                    Label("Import", systemImage: "square.and.arrow.down")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("Import a disk image as a new VM")
+
+                Button {
                     viewModel.refresh()
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
@@ -125,19 +144,29 @@ private struct EmptyLibraryView: View {
             Text("No VMs Found")
                 .font(.headline)
 
-            Text("Create a virtual machine to get started.")
+            Text("Create a new virtual machine or import an existing disk image.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            Button {
-                viewModel.showCreationWizard = true
-            } label: {
-                Label("Create VM", systemImage: "plus.circle.fill")
+            HStack(spacing: 12) {
+                Button {
+                    viewModel.showCreationWizard = true
+                } label: {
+                    Label("Create VM", systemImage: "plus.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .controlSize(.large)
+
+                Button {
+                    viewModel.showImportSheet = true
+                } label: {
+                    Label("Import VM", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.blue)
-            .controlSize(.large)
             .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
