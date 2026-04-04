@@ -277,6 +277,10 @@ private struct VMDetailContent: View {
         viewModel.controller(for: config.id)
     }
 
+    private var usesExternalResources: Bool {
+        viewModel.usesExternalResources(for: config)
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
@@ -288,6 +292,15 @@ private struct VMDetailContent: View {
 
                 Divider()
                     .padding(.horizontal, 24)
+
+                if usesExternalResources {
+                    externalFilesBanner
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 16)
+
+                    Divider()
+                        .padding(.horizontal, 24)
+                }
 
                 // Install macOS prompt for fresh VMs
                 if viewModel.needsOSInstall(for: config) {
@@ -338,7 +351,11 @@ private struct VMDetailContent: View {
                 viewModel.deleteVM(id: config.id)
             }
         } message: {
-            Text("Are you sure you want to delete \"\(config.identity.name)\"? This will permanently remove the VM and all its disk images. This action cannot be undone.")
+            if usesExternalResources {
+                Text("Are you sure you want to delete \"\(config.identity.name)\"? This will remove the Vortex VM bundle and metadata, but leave the referenced external files in place.")
+            } else {
+                Text("Are you sure you want to delete \"\(config.identity.name)\"? This will permanently remove the VM and all its disk images. This action cannot be undone.")
+            }
         }
     }
 
@@ -433,6 +450,32 @@ private struct VMDetailContent: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
+    private var externalFilesBanner: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "externaldrive.badge.link")
+                .font(.title2)
+                .foregroundStyle(.blue)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("External VM Files")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+
+                Text("This VM references files outside its Vortex bundle. Shut down other hypervisors first before starting it here.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Snapshots are disabled because the source of truth lives outside the Vortex bundle.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+        }
+        .padding(14)
+        .background(.blue.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
     private var statusBadge: some View {
         let label = viewModel.stateLabel(for: config.id)
         let color: Color = {
@@ -474,6 +517,7 @@ private struct VMDetailContent: View {
                 InfoItem(label: "CPU", value: "\(config.hardware.cpuCoreCount) cores")
                 InfoItem(label: "Memory", value: config.hardware.memoryDisplayString)
                 InfoItem(label: "Disk", value: diskSummary)
+                InfoItem(label: "Files", value: usesExternalResources ? "External" : "Managed by Vortex")
                 InfoItem(label: "Display", value: displaySummary)
                 InfoItem(label: "Network", value: networkSummary)
                 InfoItem(label: "Clipboard", value: config.clipboard.enabled ? "Enabled" : "Disabled")

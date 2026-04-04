@@ -5,8 +5,9 @@
 // files (AuxiliaryStorage, hardwareModel.bin, machineIdentifier.bin) near the
 // disk and in UTM config.plist if present, lets the user configure the VM
 // (name, CPU, memory), then creates a VM bundle via VMFileManager, clones the
-// disk with clonefile() + fallback, materializes any embedded UTM macOS
-// identity blobs, copies companions, and saves the config via VMRepository.
+// disk with clonefile() + fallback or references the original files in place,
+// materializes any embedded UTM macOS identity blobs, copies companions as
+// needed, and saves the config via VMRepository.
 
 import Darwin
 import Foundation
@@ -18,6 +19,15 @@ import VortexPersistence
 
 /// Sheet view for importing an existing disk image as a new Vortex VM.
 struct VMImportView: View {
+
+    /// Controls whether import copies data into the Vortex bundle or keeps the
+    /// original VM state in place and references it directly.
+    private enum ImportMode: String, CaseIterable {
+        case copy = "Copy"
+        case reference = "Reference"
+
+        var title: String { rawValue }
+    }
 
     /// A macOS companion can come from a sidecar file or be embedded in UTM's
     /// config.plist as raw Virtualization.framework data.
@@ -55,6 +65,7 @@ struct VMImportView: View {
     @State private var vmName: String = "Imported VM"
     @State private var cpuCores: Int = 4
     @State private var memoryGiB: Int = min(8, HardwareProfile.maximumMemoryGiB)
+    @State private var importMode: ImportMode = .copy
 
     /// Progress and error state.
     @State private var isImporting: Bool = false
@@ -102,6 +113,10 @@ struct VMImportView: View {
             && (!hasAnyMacPlatformArtifact || hasCompleteMacPlatformArtifacts)
     }
 
+    private var shouldReferenceOriginalFiles: Bool {
+        importMode == .reference
+    }
+
     // MARK: - Body
 
     var body: some View {
@@ -139,6 +154,10 @@ struct VMImportView: View {
                     // VM configuration
                     if diskImageURL != nil {
                         configurationSection
+                    }
+
+                    if shouldReferenceOriginalFiles {
+                        referenceModeWarning
                     }
 
                     // Progress / error
@@ -195,7 +214,7 @@ struct VMImportView: View {
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
         }
-        .frame(width: 520, height: 540)
+        .frame(width: 520, height: 620)
     }
 
     // MARK: - Disk Selection
@@ -389,7 +408,47 @@ struct VMImportView: View {
             .padding(12)
             .background(.black.opacity(0.2))
             .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Import Mode")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+
+                Picker("Import Mode", selection: $importMode) {
+                    ForEach(ImportMode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Text(importModeDescription)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
+    }
+
+    private var importModeDescription: String {
+        switch importMode {
+        case .copy:
+            return "Create a separate Vortex-managed copy. Changes in UTM and Vortex will drift."
+        case .reference:
+            return "Keep the original disk and mutable macOS state in place. Shut down the source VM first. Snapshots are not supported for this VM in Vortex."
+        }
+    }
+
+    private var referenceModeWarning: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "externaldrive.badge.link")
+                .foregroundStyle(.blue)
+            Text("Reference mode keeps the boot disk and mutable macOS state in the original location. Deleting this VM in Vortex removes only Vortex metadata, not the source files.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.blue.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     // MARK: - Disk Image Panel
@@ -561,8 +620,9 @@ struct VMImportView: View {
 
     // MARK: - Import
 
-    /// Performs the full import: creates the VM bundle, clones the disk image,
-    /// copies companion files, and saves the configuration.
+    /// Performs the full import: creates the VM bundle, then either clones the
+    /// disk image into Vortex or references the source file directly, persists
+    /// any required macOS identity files, and saves the configuration.
     private func performImport() async {
         guard let sourceURL = diskImageURL else { return }
 
@@ -577,10 +637,12 @@ struct VMImportView: View {
         let trimmedName = vmName.trimmingCharacters(in: .whitespaces)
 
         // Build the VM configuration.
-        let diskPath = fileManager.diskPath(vmID: vmID, diskName: "boot.img")
-        let auxDstPath = fileManager.subdirectoryPath(.auxiliary, for: vmID)
+        let bundleDiskPath = fileManager.diskPath(vmID: vmID, diskName: "boot.img")
+        let auxBundlePath = fileManager.subdirectoryPath(.auxiliary, for: vmID)
             .appendingPathComponent("AuxiliaryStorage")
-        let machineIdDstPath = fileManager.subdirectoryPath(.auxiliary, for: vmID)
+        let hardwareModelBundlePath = fileManager.subdirectoryPath(.auxiliary, for: vmID)
+            .appendingPathComponent("hardwareModel.bin")
+        let machineIdBundlePath = fileManager.subdirectoryPath(.auxiliary, for: vmID)
             .appendingPathComponent("machineIdentifier.bin")
 
         // Determine disk size from the source file.
@@ -602,6 +664,17 @@ struct VMImportView: View {
         // Determine if this is a macOS VM based on companion files.
         let isMacOS = hasCompleteMacPlatformArtifacts
 
+        let resolvedDiskPath = shouldReferenceOriginalFiles ? sourceURL.path : bundleDiskPath.path
+        let resolvedAuxiliaryPath = shouldReferenceOriginalFiles ? auxiliaryStoragePath?.path : auxBundlePath.path
+        let resolvedHardwareModelPath = resolvedCompanionPath(
+            source: hardwareModelSource,
+            fallbackDestination: hardwareModelBundlePath
+        )
+        let resolvedMachineIdentifierPath = resolvedCompanionPath(
+            source: machineIdentifierSource,
+            fallbackDestination: machineIdBundlePath
+        )
+
         let config: VMConfiguration
         if isMacOS {
             config = VMConfiguration(
@@ -612,7 +685,7 @@ struct VMImportView: View {
                 storage: StorageConfiguration(disks: [
                     DiskConfig(
                         label: "Boot Disk",
-                        imagePath: diskPath.path,
+                        imagePath: resolvedDiskPath,
                         sizeBytes: diskSizeBytes
                     )
                 ]),
@@ -621,8 +694,9 @@ struct VMImportView: View {
                 audio: .systemDefaults,
                 clipboard: .enabled,
                 bootConfig: .macOS(
-                    auxiliaryStoragePath: auxDstPath.path,
-                    machineIdentifierPath: machineIdDstPath.path
+                    auxiliaryStoragePath: resolvedAuxiliaryPath ?? auxBundlePath.path,
+                    machineIdentifierPath: resolvedMachineIdentifierPath ?? machineIdBundlePath.path,
+                    hardwareModelPath: resolvedHardwareModelPath
                 )
             )
         } else {
@@ -636,7 +710,7 @@ struct VMImportView: View {
                 storage: StorageConfiguration(disks: [
                     DiskConfig(
                         label: "Boot Disk",
-                        imagePath: diskPath.path,
+                        imagePath: resolvedDiskPath,
                         sizeBytes: diskSizeBytes
                     )
                 ]),
@@ -655,25 +729,31 @@ struct VMImportView: View {
             try fileManager.createVMBundle(for: config)
 
             // Step 2: Clone the disk image.
-            importProgress = "Copying disk image..."
-            try cloneFile(from: sourceURL, to: diskPath)
+            if shouldReferenceOriginalFiles {
+                importProgress = "Referencing original disk..."
+            } else {
+                importProgress = "Copying disk image..."
+                try cloneFile(from: sourceURL, to: bundleDiskPath)
+            }
 
             // Step 3: Copy companion files.
-            if let auxSource = auxiliaryStoragePath {
+            if !shouldReferenceOriginalFiles, let auxSource = auxiliaryStoragePath {
                 importProgress = "Copying auxiliary storage..."
-                try copyFile(from: auxSource, to: auxDstPath)
+                try copyFile(from: auxSource, to: auxBundlePath)
             }
 
             if let hwModelSource = hardwareModelSource {
-                importProgress = "Copying hardware model..."
-                let hwModelDst = fileManager.subdirectoryPath(.auxiliary, for: vmID)
-                    .appendingPathComponent("hardwareModel.bin")
-                try persistCompanion(from: hwModelSource, to: hwModelDst)
+                if shouldPersistCompanion(hwModelSource) {
+                    importProgress = "Copying hardware model..."
+                    try persistCompanion(from: hwModelSource, to: hardwareModelBundlePath)
+                }
             }
 
             if let machineIdSource = machineIdentifierSource {
-                importProgress = "Copying machine identifier..."
-                try persistCompanion(from: machineIdSource, to: machineIdDstPath)
+                if shouldPersistCompanion(machineIdSource) {
+                    importProgress = "Copying machine identifier..."
+                    try persistCompanion(from: machineIdSource, to: machineIdBundlePath)
+                }
             }
 
             // Step 4: Save the configuration.
@@ -782,6 +862,38 @@ struct VMImportView: View {
             throw VortexError.diskOperationFailed(
                 reason: "Failed to write \(destination.lastPathComponent) to \(destination.path): \(error.localizedDescription)"
             )
+        }
+    }
+
+    /// Returns the path Vortex should persist in the VM config for a given
+    /// companion artifact. In reference mode, on-disk source files are reused
+    /// directly; embedded plist blobs are materialized inside the bundle.
+    private func resolvedCompanionPath(
+        source: CompanionSource?,
+        fallbackDestination: URL
+    ) -> String? {
+        guard let source else { return nil }
+
+        switch (shouldReferenceOriginalFiles, source) {
+        case (true, .file(let url)):
+            return url.path
+        case (true, .embedded):
+            return fallbackDestination.path
+        case (false, _):
+            return fallbackDestination.path
+        }
+    }
+
+    /// Embedded plist companions must always be materialized; sidecar files are
+    /// only copied when Vortex is creating its own local VM state.
+    private func shouldPersistCompanion(_ source: CompanionSource) -> Bool {
+        switch (shouldReferenceOriginalFiles, source) {
+        case (true, .embedded):
+            return true
+        case (true, .file):
+            return false
+        case (false, _):
+            return true
         }
     }
 }

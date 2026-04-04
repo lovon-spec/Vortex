@@ -433,8 +433,13 @@ public final class TrackAVMManager: @unchecked Sendable {
         } else {
             // For fresh installs, the hardware model comes from the IPSW.
             // This path is a fallback for re-opening existing VMs.
-            let hwModelURL = auxURL.deletingLastPathComponent()
-                .appendingPathComponent("hardwareModel.bin")
+            let hwModelURL: URL = {
+                if let explicitPath = configuration.bootConfig.hardwareModelPath {
+                    return URL(fileURLWithPath: explicitPath)
+                }
+                return auxURL.deletingLastPathComponent()
+                    .appendingPathComponent("hardwareModel.bin")
+            }()
             guard let hwData = try? Data(contentsOf: hwModelURL),
                   let hwModel = VZMacHardwareModel(dataRepresentation: hwData) else {
                 throw VortexError.vmCreationFailed(
@@ -462,8 +467,13 @@ public final class TrackAVMManager: @unchecked Sendable {
 
         // Hardware model (load from disk if not already set above)
         if platform.hardwareModel.dataRepresentation.isEmpty {
-            let hwModelURL = auxURL.deletingLastPathComponent()
-                .appendingPathComponent("hardwareModel.bin")
+            let hwModelURL: URL = {
+                if let explicitPath = configuration.bootConfig.hardwareModelPath {
+                    return URL(fileURLWithPath: explicitPath)
+                }
+                return auxURL.deletingLastPathComponent()
+                    .appendingPathComponent("hardwareModel.bin")
+            }()
             if let hwData = try? Data(contentsOf: hwModelURL),
                let hwModel = VZMacHardwareModel(dataRepresentation: hwData) {
                 platform.hardwareModel = hwModel

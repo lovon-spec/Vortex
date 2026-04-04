@@ -222,9 +222,20 @@ public final class VZVMManager: NSObject {
         progressObservation.invalidate()
 
         // Save the hardware model for future boots.
-        let hardwareModelURL = URL(fileURLWithPath: auxPath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("hardwareModel.bin")
+        let hardwareModelURL: URL = {
+            if let explicitPath = config.bootConfig.hardwareModelPath {
+                return URL(fileURLWithPath: explicitPath)
+            }
+            return URL(fileURLWithPath: auxPath)
+                .deletingLastPathComponent()
+                .appendingPathComponent("hardwareModel.bin")
+        }()
+        let hardwareModelParent = hardwareModelURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(
+            at: hardwareModelParent,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
         try hardwareModel.dataRepresentation.write(to: hardwareModelURL)
     }
 
@@ -546,14 +557,19 @@ public final class VZVMManager: NSObject {
         if let model = hardwareModel {
             platform.hardwareModel = model
         } else {
-            guard let auxPath = config.bootConfig.auxiliaryStoragePath else {
-                throw VortexError.vmCreationFailed(
-                    reason: "macOS platform requires auxiliaryStoragePath."
-                )
+            let hwModelURL: URL
+            if let explicitPath = config.bootConfig.hardwareModelPath {
+                hwModelURL = URL(fileURLWithPath: explicitPath)
+            } else {
+                guard let auxPath = config.bootConfig.auxiliaryStoragePath else {
+                    throw VortexError.vmCreationFailed(
+                        reason: "macOS platform requires auxiliaryStoragePath."
+                    )
+                }
+                hwModelURL = URL(fileURLWithPath: auxPath)
+                    .deletingLastPathComponent()
+                    .appendingPathComponent("hardwareModel.bin")
             }
-            let hwModelURL = URL(fileURLWithPath: auxPath)
-                .deletingLastPathComponent()
-                .appendingPathComponent("hardwareModel.bin")
             guard let hwData = try? Data(contentsOf: hwModelURL),
                   let model = VZMacHardwareModel(dataRepresentation: hwData) else {
                 throw VortexError.vmCreationFailed(

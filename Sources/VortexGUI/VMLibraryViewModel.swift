@@ -257,4 +257,9 @@ final class VMLibraryViewModel {
         // is near zero. Use a threshold: if less than 1 MiB, treat as empty.
         return fileSize < 1024 * 1024
     }
+
+    /// Returns true when the VM references files outside its own bundle.
+    func usesExternalResources(for config: VMConfiguration) -> Bool {
+        config.usesExternalResources(bundlePath: fileManager.vmBundlePath(for: config.id))
+    }
 }

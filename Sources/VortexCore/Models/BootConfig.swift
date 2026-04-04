@@ -29,6 +29,12 @@ public struct BootConfig: Codable, Sendable, Hashable {
     /// Path to the machine identifier file for macOS guests.
     public var machineIdentifierPath: String?
 
+    /// Path to the hardware model file for macOS guests.
+    ///
+    /// When omitted, callers may derive the hardware model from the
+    /// auxiliary storage directory for backwards compatibility.
+    public var hardwareModelPath: String?
+
     public init(
         mode: BootMode,
         uefiStorePath: String? = nil,
@@ -37,7 +43,8 @@ public struct BootConfig: Codable, Sendable, Hashable {
         initrdPath: String? = nil,
         macOSRestoreImagePath: String? = nil,
         auxiliaryStoragePath: String? = nil,
-        machineIdentifierPath: String? = nil
+        machineIdentifierPath: String? = nil,
+        hardwareModelPath: String? = nil
     ) {
         self.mode = mode
         self.uefiStorePath = uefiStorePath
@@ -47,6 +54,7 @@ public struct BootConfig: Codable, Sendable, Hashable {
         self.macOSRestoreImagePath = macOSRestoreImagePath
         self.auxiliaryStoragePath = auxiliaryStoragePath
         self.machineIdentifierPath = machineIdentifierPath
+        self.hardwareModelPath = hardwareModelPath
     }
 
     // MARK: - Factory methods
@@ -56,16 +64,19 @@ public struct BootConfig: Codable, Sendable, Hashable {
     ///   - restoreImagePath: Path to the IPSW file (only needed for initial install).
     ///   - auxiliaryStoragePath: Path to the NVRAM storage file.
     ///   - machineIdentifierPath: Path to the machine identifier file.
+    ///   - hardwareModelPath: Optional explicit path to the hardware model file.
     public static func macOS(
         restoreImagePath: String? = nil,
         auxiliaryStoragePath: String,
-        machineIdentifierPath: String
+        machineIdentifierPath: String,
+        hardwareModelPath: String? = nil
     ) -> BootConfig {
         BootConfig(
             mode: .macOS,
             macOSRestoreImagePath: restoreImagePath,
             auxiliaryStoragePath: auxiliaryStoragePath,
-            machineIdentifierPath: machineIdentifierPath
+            machineIdentifierPath: machineIdentifierPath,
+            hardwareModelPath: hardwareModelPath
         )
     }
 

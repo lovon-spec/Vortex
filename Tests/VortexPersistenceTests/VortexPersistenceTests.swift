@@ -30,6 +30,22 @@ struct VMConfigCodecTests {
         #expect(decoded.bootConfig.mode == .uefi)
     }
 
+    @Test("Round-trip preserves explicit macOS hardware model path")
+    func encodeDecodePreservesHardwareModelPath() throws {
+        let config = VMConfiguration.defaultMacOS(
+            name: "macOS",
+            diskImagePath: "/tmp/boot.img",
+            auxiliaryStoragePath: "/tmp/AuxiliaryStorage",
+            machineIdentifierPath: "/tmp/machineIdentifier.bin",
+            hardwareModelPath: "/tmp/hardwareModel.bin"
+        )
+
+        let data = try VMConfigCodec.encode(config)
+        let decoded = try VMConfigCodec.decode(VMConfiguration.self, from: data)
+
+        #expect(decoded.bootConfig.hardwareModelPath == "/tmp/hardwareModel.bin")
+    }
+
     @Test("Encoder output is pretty-printed without escaped slashes")
     func encoderOutputIsPrettyPrinted() throws {
         let config = VMConfiguration.defaultLinux(

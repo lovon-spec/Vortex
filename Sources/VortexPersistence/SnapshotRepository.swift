@@ -89,6 +89,7 @@ public final class SnapshotRepository: Sendable {
         guard fileManager.bundleExists(for: vmID) else {
             throw VortexError.vmNotFound(id: vmID)
         }
+        try ensureSnapshotsSupported(for: vmID)
 
         let snapshotID = UUID()
         let snapshotDir = fileManager.snapshotPath(snapshotID: snapshotID, for: vmID)
@@ -175,6 +176,7 @@ public final class SnapshotRepository: Sendable {
         guard fileManager.bundleExists(for: vmID) else {
             throw VortexError.vmNotFound(id: vmID)
         }
+        try ensureSnapshotsSupported(for: vmID)
 
         let snapshotDir = fileManager.snapshotPath(snapshotID: snapshotID, for: vmID)
         let snapshotDisksDir = snapshotDir.appendingPathComponent(Self.disksSubdirectory, isDirectory: true)
@@ -331,6 +333,29 @@ public final class SnapshotRepository: Sendable {
         } catch {
             throw VortexError.persistenceFailed(
                 reason: "Failed to save snapshot metadata: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    // MARK: - External resource guard
+
+    /// Snapshots are only well-defined for VMs whose mutable state lives inside
+    /// the Vortex bundle. External-reference VMs keep their source of truth
+    /// elsewhere and should not be snapshotted from inside Vortex.
+    private func ensureSnapshotsSupported(for vmID: UUID) throws {
+        let configPath = fileManager.configFilePath(for: vmID)
+
+        guard FileManager.default.fileExists(atPath: configPath.path) else {
+            throw VortexError.vmNotFound(id: vmID)
+        }
+
+        let data = try Data(contentsOf: configPath)
+        let config = try VMConfigCodec.decode(VMConfiguration.self, from: data)
+        let bundlePath = fileManager.vmBundlePath(for: vmID)
+
+        guard !config.usesExternalResources(bundlePath: bundlePath) else {
+            throw VortexError.snapshotFailed(
+                reason: "Snapshots are not supported for VMs that reference external files."
             )
         }
     }

@@ -165,6 +165,45 @@ public struct VMConfiguration: Codable, Identifiable, Sendable, Hashable {
         validate().isEmpty
     }
 
+    // MARK: - Path introspection
+
+    /// Returns every host-side file path referenced by this configuration.
+    ///
+    /// This is used to detect VMs that point at external files instead of
+    /// storing all mutable state inside their own `.vortexvm` bundle.
+    public var referencedFilePaths: [String] {
+        var paths = storage.disks.map(\.imagePath)
+
+        let bootPaths = [
+            bootConfig.uefiStorePath,
+            bootConfig.kernelPath,
+            bootConfig.initrdPath,
+            bootConfig.macOSRestoreImagePath,
+            bootConfig.auxiliaryStoragePath,
+            bootConfig.machineIdentifierPath,
+            bootConfig.hardwareModelPath,
+        ]
+
+        paths.append(contentsOf: bootPaths.compactMap { $0 })
+        return paths
+    }
+
+    /// Returns true when any referenced file path lives outside the VM bundle.
+    public func usesExternalResources(bundlePath: URL) -> Bool {
+        let bundleRoot = bundlePath.standardizedFileURL
+            .resolvingSymlinksInPath()
+            .path
+        let bundlePrefix = bundleRoot.hasSuffix("/") ? bundleRoot : bundleRoot + "/"
+
+        return referencedFilePaths.contains { path in
+            let normalized = URL(fileURLWithPath: path)
+                .standardizedFileURL
+                .resolvingSymlinksInPath()
+                .path
+            return normalized != bundleRoot && !normalized.hasPrefix(bundlePrefix)
+        }
+    }
+
     // MARK: - Factory methods
 
     /// Create a default macOS VM configuration.
@@ -174,12 +213,14 @@ public struct VMConfiguration: Codable, Identifiable, Sendable, Hashable {
     ///   - diskSizeGiB: Boot disk size in GiB.
     ///   - auxiliaryStoragePath: Path to the NVRAM file.
     ///   - machineIdentifierPath: Path to the machine identifier file.
+    ///   - hardwareModelPath: Optional explicit path to the hardware model file.
     public static func defaultMacOS(
         name: String,
         diskImagePath: String,
         diskSizeGiB: UInt64 = 64,
         auxiliaryStoragePath: String,
-        machineIdentifierPath: String
+        machineIdentifierPath: String,
+        hardwareModelPath: String? = nil
     ) -> VMConfiguration {
         VMConfiguration(
             identity: VMIdentity(name: name, iconName: "desktopcomputer"),
@@ -194,7 +235,8 @@ public struct VMConfiguration: Codable, Identifiable, Sendable, Hashable {
             clipboard: .enabled,
             bootConfig: .macOS(
                 auxiliaryStoragePath: auxiliaryStoragePath,
-                machineIdentifierPath: machineIdentifierPath
+                machineIdentifierPath: machineIdentifierPath,
+                hardwareModelPath: hardwareModelPath
             )
         )
     }
