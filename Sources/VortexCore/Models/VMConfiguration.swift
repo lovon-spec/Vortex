@@ -131,6 +131,23 @@ public struct VMConfiguration: Codable, Identifiable, Sendable, Hashable {
             }
         }
 
+        // Network
+        for (index, iface) in network.interfaces.enumerated() {
+            let name = iface.label ?? "Network interface \(index + 1)"
+            switch iface.mode {
+            case .bridged(let hostInterface):
+                if hostInterface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    issues.append("\(name) has an empty bridged host interface.")
+                }
+            case .vmnetShared(let networkID):
+                if networkID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    issues.append("\(name) has an empty shared LAN network ID.")
+                }
+            case .nat, .hostOnly:
+                break
+            }
+        }
+
         // Boot config consistency
         switch bootConfig.mode {
         case .macOS:

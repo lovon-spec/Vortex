@@ -486,7 +486,7 @@ public final class VZVMManager: NSObject {
         vzConfig.storageDevices = try buildStorageDevices(config: config)
 
         // -- Network --
-        vzConfig.networkDevices = buildNetworkDevices(config: config)
+        vzConfig.networkDevices = try buildNetworkDevices(config: config)
 
         // -- Display --
         vzConfig.graphicsDevices = buildGraphicsDevices(config: config)
@@ -715,7 +715,7 @@ public final class VZVMManager: NSObject {
     /// Builds network device configurations from the network configuration.
     private func buildNetworkDevices(
         config: VMConfiguration
-    ) -> [VZNetworkDeviceConfiguration] {
+    ) throws -> [VZNetworkDeviceConfiguration] {
         var devices: [VZNetworkDeviceConfiguration] = []
 
         for iface in config.network.interfaces {
@@ -738,10 +738,16 @@ public final class VZVMManager: NSObject {
                 }
 
             case .hostOnly:
-                // VZ doesn't have a dedicated host-only mode.
-                // Use NAT as the closest approximation; the firewall rules
-                // can further restrict outbound traffic if needed.
-                netConfig.attachment = VZNATNetworkDeviceAttachment()
+                netConfig.attachment = try VmnetNetworkRegistry.shared.attachment(
+                    kind: .hostOnly,
+                    networkID: NetworkMode.defaultVmnetNetworkID
+                )
+
+            case .vmnetShared(let networkID):
+                netConfig.attachment = try VmnetNetworkRegistry.shared.attachment(
+                    kind: .shared,
+                    networkID: networkID
+                )
             }
 
             // Set MAC address if specified.

@@ -36,6 +36,54 @@ enum SettingsTab: String, CaseIterable {
     }
 }
 
+private enum NetworkModeChoice: String, CaseIterable, Identifiable {
+    case nat
+    case vmnetShared
+    case hostOnly
+    case bridged
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .nat:
+            return "NAT"
+        case .vmnetShared:
+            return "Shared LAN"
+        case .hostOnly:
+            return "Host Only"
+        case .bridged:
+            return "Bridged"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .nat:
+            return "arrow.triangle.branch"
+        case .vmnetShared:
+            return "point.3.connected.trianglepath.dotted"
+        case .hostOnly:
+            return "macwindow.on.rectangle"
+        case .bridged:
+            return "network"
+        }
+    }
+
+    init(mode: NetworkMode) {
+        switch mode {
+        case .nat:
+            self = .nat
+        case .vmnetShared:
+            self = .vmnetShared
+        case .hostOnly:
+            self = .hostOnly
+        case .bridged:
+            self = .bridged
+        }
+    }
+}
+
 // MARK: - VMSettingsView
 
 /// Tabbed settings sheet for editing a VM's configuration.
@@ -123,7 +171,7 @@ struct VMSettingsView: View {
                 .padding(.horizontal, 24)
                 .padding(.vertical, 16)
         }
-        .frame(width: 540, height: 480)
+        .frame(width: 620, height: 540)
         .onChange(of: editedConfig) {
             hasChanges = editedConfig != config
         }
@@ -423,6 +471,25 @@ struct VMSettingsView: View {
     private var networkTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Text("Interfaces")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.secondary)
+                        .textCase(.uppercase)
+
+                    Spacer()
+
+                    Button {
+                        addNetworkInterface()
+                    } label: {
+                        Label("Add Interface", systemImage: "plus")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Add network interface")
+                }
+
                 if editedConfig.network.interfaces.isEmpty {
                     HStack {
                         Image(systemName: "network.slash")
@@ -436,33 +503,11 @@ struct VMSettingsView: View {
                     .background(.black.opacity(0.2))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 } else {
-                    ForEach(Array(editedConfig.network.interfaces.enumerated()), id: \.element.id) { index, iface in
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Label(iface.label ?? "Interface \(index + 1)", systemImage: "network")
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-                                Spacer()
-                                networkModeText(iface.mode)
-                            }
-
-                            if let mac = iface.macAddress {
-                                HStack {
-                                    Text("MAC Address")
-                                        .font(.caption)
-                                        .foregroundStyle(.tertiary)
-                                    Spacer()
-                                    Text(mac)
-                                        .font(.caption)
-                                        .monospaced()
-                                        .foregroundStyle(.secondary)
-                                        .textSelection(.enabled)
-                                }
-                            }
-                        }
-                        .padding(12)
-                        .background(.black.opacity(0.2))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    ForEach(
+                        Array(editedConfig.network.interfaces.enumerated()),
+                        id: \.element.id
+                    ) { index, _ in
+                        networkInterfaceRow(index: index)
                     }
                 }
 
@@ -475,22 +520,212 @@ struct VMSettingsView: View {
         }
     }
 
-    private func networkModeText(_ mode: NetworkMode) -> some View {
-        let text: String
-        switch mode {
-        case .nat:
-            text = "NAT"
-        case .bridged(let iface):
-            text = "Bridged (\(iface))"
-        case .hostOnly:
-            text = "Host Only"
+    @ViewBuilder
+    private func networkInterfaceRow(index: Int) -> some View {
+        if editedConfig.network.interfaces.indices.contains(index) {
+            let iface = editedConfig.network.interfaces[index]
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Label("Interface \(index + 1)", systemImage: "network")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+
+                    Spacer()
+
+                    networkModeText(iface.mode)
+
+                    Button {
+                        removeNetworkInterface(at: index)
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Remove interface")
+                }
+
+                HStack(spacing: 12) {
+                    fieldLabel("Label")
+                    TextField("Interface label", text: networkLabelBinding(for: index))
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                HStack(spacing: 12) {
+                    fieldLabel("Mode")
+                    Picker("Mode", selection: networkModeChoiceBinding(for: index)) {
+                        ForEach(NetworkModeChoice.allCases) { choice in
+                            Label(choice.title, systemImage: choice.icon)
+                                .tag(choice)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                networkModeDetailControls(index: index, mode: iface.mode)
+
+                if let mac = iface.macAddress {
+                    HStack {
+                        Text("MAC Address")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                        Spacer()
+                        Text(mac)
+                            .font(.caption)
+                            .monospaced()
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+            .padding(12)
+            .background(.black.opacity(0.2))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
         }
-        return Text(text)
+    }
+
+    @ViewBuilder
+    private func networkModeDetailControls(index: Int, mode: NetworkMode) -> some View {
+        switch mode {
+        case .bridged:
+            HStack(spacing: 12) {
+                fieldLabel("Host Interface")
+                TextField("en0", text: bridgedInterfaceBinding(for: index))
+                    .textFieldStyle(.roundedBorder)
+            }
+        case .vmnetShared:
+            HStack(spacing: 12) {
+                fieldLabel("Network ID")
+                TextField(
+                    NetworkMode.defaultVmnetNetworkID,
+                    text: vmnetNetworkIDBinding(for: index)
+                )
+                    .textFieldStyle(.roundedBorder)
+            }
+        case .nat, .hostOnly:
+            EmptyView()
+        }
+    }
+
+    private func fieldLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+            .frame(width: 92, alignment: .leading)
+    }
+
+    private func networkModeText(_ mode: NetworkMode) -> some View {
+        Text(mode.displayName)
             .font(.caption)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .background(.blue.opacity(0.12))
             .clipShape(Capsule())
+    }
+
+    private func addNetworkInterface() {
+        editedConfig.network.interfaces.append(.nat(label: "Interface"))
+    }
+
+    private func removeNetworkInterface(at index: Int) {
+        guard editedConfig.network.interfaces.indices.contains(index) else { return }
+        editedConfig.network.interfaces.remove(at: index)
+    }
+
+    private func networkLabelBinding(for index: Int) -> Binding<String> {
+        Binding(
+            get: {
+                guard editedConfig.network.interfaces.indices.contains(index) else { return "" }
+                return editedConfig.network.interfaces[index].label ?? ""
+            },
+            set: { value in
+                guard editedConfig.network.interfaces.indices.contains(index) else { return }
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                editedConfig.network.interfaces[index].label = trimmed.isEmpty ? nil : value
+            }
+        )
+    }
+
+    private func networkModeChoiceBinding(for index: Int) -> Binding<NetworkModeChoice> {
+        Binding(
+            get: {
+                guard editedConfig.network.interfaces.indices.contains(index) else { return .nat }
+                return NetworkModeChoice(mode: editedConfig.network.interfaces[index].mode)
+            },
+            set: { choice in
+                setNetworkModeChoice(choice, at: index)
+            }
+        )
+    }
+
+    private func bridgedInterfaceBinding(for index: Int) -> Binding<String> {
+        Binding(
+            get: {
+                guard editedConfig.network.interfaces.indices.contains(index),
+                      case .bridged(let hostInterface) = editedConfig.network.interfaces[index].mode else {
+                    return "en0"
+                }
+                return hostInterface
+            },
+            set: { value in
+                guard editedConfig.network.interfaces.indices.contains(index) else { return }
+                editedConfig.network.interfaces[index].mode = .bridged(hostInterface: value)
+            }
+        )
+    }
+
+    private func vmnetNetworkIDBinding(for index: Int) -> Binding<String> {
+        Binding(
+            get: {
+                guard editedConfig.network.interfaces.indices.contains(index),
+                      case .vmnetShared(let networkID) = editedConfig.network.interfaces[index].mode else {
+                    return NetworkMode.defaultVmnetNetworkID
+                }
+                return networkID
+            },
+            set: { value in
+                guard editedConfig.network.interfaces.indices.contains(index) else { return }
+                editedConfig.network.interfaces[index].mode = .vmnetShared(networkID: value)
+            }
+        )
+    }
+
+    private func setNetworkModeChoice(_ choice: NetworkModeChoice, at index: Int) {
+        guard editedConfig.network.interfaces.indices.contains(index) else { return }
+        let currentMode = editedConfig.network.interfaces[index].mode
+
+        switch choice {
+        case .nat:
+            editedConfig.network.interfaces[index].mode = .nat
+        case .vmnetShared:
+            editedConfig.network.interfaces[index].mode = .vmnetShared(
+                networkID: existingVmnetNetworkID(from: currentMode)
+            )
+        case .hostOnly:
+            editedConfig.network.interfaces[index].mode = .hostOnly
+        case .bridged:
+            editedConfig.network.interfaces[index].mode = .bridged(
+                hostInterface: existingBridgeInterface(from: currentMode)
+            )
+        }
+    }
+
+    private func existingVmnetNetworkID(from mode: NetworkMode) -> String {
+        if case .vmnetShared(let networkID) = mode {
+            let trimmed = networkID.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? NetworkMode.defaultVmnetNetworkID : networkID
+        }
+        return NetworkMode.defaultVmnetNetworkID
+    }
+
+    private func existingBridgeInterface(from mode: NetworkMode) -> String {
+        if case .bridged(let hostInterface) = mode {
+            return hostInterface.isEmpty ? "en0" : hostInterface
+        }
+        return "en0"
     }
 
     // MARK: - Audio Tab

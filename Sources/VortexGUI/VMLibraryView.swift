@@ -538,7 +538,7 @@ private struct VMDetailContent: View {
     private var networkSummary: String {
         let count = config.network.interfaces.count
         if count == 0 { return "None" }
-        let mode = config.network.interfaces.first.map { "\($0.mode)" } ?? ""
+        let mode = config.network.interfaces.first?.mode.displayName ?? ""
         return "\(count) interface\(count == 1 ? "" : "s") (\(mode))"
     }
 

@@ -140,6 +140,7 @@ let package = Package(
             path: "Sources/VortexVZ",
             linkerSettings: [
                 .linkedFramework("Virtualization"),
+                .linkedFramework("vmnet"),
             ]
         ),
         .testTarget(

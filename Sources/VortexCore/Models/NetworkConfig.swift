@@ -63,12 +63,25 @@ public struct NetworkInterfaceConfig: Codable, Sendable, Hashable, Identifiable 
     public static func hostOnly(label: String? = nil) -> NetworkInterfaceConfig {
         NetworkInterfaceConfig(mode: .hostOnly, label: label ?? "Host Only")
     }
+
+    /// Create a shared vmnet LAN interface for VM-to-VM communication.
+    public static func vmnetShared(
+        networkID: String = NetworkMode.defaultVmnetNetworkID,
+        label: String? = nil
+    ) -> NetworkInterfaceConfig {
+        NetworkInterfaceConfig(
+            mode: .vmnetShared(networkID: networkID),
+            label: label ?? "Shared LAN"
+        )
+    }
 }
 
 // MARK: - Network mode
 
 /// The type of virtual network attachment.
 public enum NetworkMode: Codable, Sendable, Hashable {
+    public static let defaultVmnetNetworkID = "default"
+
     /// NAT mode: the guest shares the host's network connection.
     /// The guest can reach external networks; inbound connections require port forwarding.
     case nat
@@ -80,6 +93,10 @@ public enum NetworkMode: Codable, Sendable, Hashable {
     /// Host-only mode: the guest can communicate only with the host.
     /// No external network access.
     case hostOnly
+
+    /// vmnet shared mode: guests on the same in-process vmnet network share a private LAN.
+    /// This uses Virtualization.framework's VZVmnetNetworkDeviceAttachment on macOS 26+.
+    case vmnetShared(networkID: String)
 }
 
 // MARK: - NetworkMode CodingKeys
@@ -88,12 +105,14 @@ extension NetworkMode {
     private enum CodingKeys: String, CodingKey {
         case type
         case hostInterface
+        case networkID
     }
 
     private enum ModeType: String, Codable {
         case nat
         case bridged
         case hostOnly
+        case vmnetShared
     }
 
     public init(from decoder: Decoder) throws {
@@ -107,6 +126,10 @@ extension NetworkMode {
             self = .bridged(hostInterface: hostInterface)
         case .hostOnly:
             self = .hostOnly
+        case .vmnetShared:
+            let networkID = try container.decodeIfPresent(String.self, forKey: .networkID)
+                ?? Self.defaultVmnetNetworkID
+            self = .vmnetShared(networkID: networkID)
         }
     }
 
@@ -120,6 +143,27 @@ extension NetworkMode {
             try container.encode(hostInterface, forKey: .hostInterface)
         case .hostOnly:
             try container.encode(ModeType.hostOnly, forKey: .type)
+        case .vmnetShared(let networkID):
+            try container.encode(ModeType.vmnetShared, forKey: .type)
+            try container.encode(networkID, forKey: .networkID)
+        }
+    }
+}
+
+extension NetworkMode {
+    /// Short display label for UI summaries.
+    public var displayName: String {
+        switch self {
+        case .nat:
+            return "NAT"
+        case .bridged(let hostInterface):
+            return "Bridged (\(hostInterface))"
+        case .hostOnly:
+            return "Host Only"
+        case .vmnetShared(let networkID):
+            let trimmed = networkID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let displayID = trimmed.isEmpty ? Self.defaultVmnetNetworkID : trimmed
+            return "Shared LAN (\(displayID))"
         }
     }
 }
