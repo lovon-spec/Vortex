@@ -58,6 +58,10 @@ public struct VortexAudioOverride: Codable, Sendable, Equatable {
 }
 
 public final class VortexServiceControlServer {
+    private static let maxMessageBytes = 64 * 1024
+    private static let okResponse = Data("ok\n".utf8)
+    private static let errorResponse = Data("error\n".utf8)
+
     private var listenFD: Int32 = -1
     private var source: DispatchSourceRead?
     private let queue = DispatchQueue(label: "com.vortex.service.control-socket")
@@ -151,6 +155,8 @@ public final class VortexServiceControlServer {
                 return
             }
             Self.disableSIGPIPE(clientFD)
+            _ = Self.setBlocking(clientFD)
+            Self.setReceiveTimeout(clientFD, seconds: 2)
             handleClient(clientFD, handler: handler)
         }
     }
@@ -161,27 +167,16 @@ public final class VortexServiceControlServer {
     ) {
         defer { close(clientFD) }
 
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        let bufferCapacity = buffer.count
-        let count = buffer.withUnsafeMutableBytes {
-            read(clientFD, $0.baseAddress, bufferCapacity)
-        }
-        guard count > 0 else { return }
-
-        let data = Data(buffer.prefix(count))
         do {
+            let data = try Self.readFramedMessage(from: clientFD)
             let command = try JSONDecoder().decode(VortexServiceCommand.self, from: data)
             Task { @MainActor in
                 handler(command)
             }
-            _ = "ok\n".withCString {
-                write(clientFD, $0, strlen($0))
-            }
+            try Self.writeAll(Self.okResponse, to: clientFD)
         } catch {
             VortexLog.service.error("Failed to decode control command: \(error.localizedDescription)")
-            _ = "error\n".withCString {
-                write(clientFD, $0, strlen($0))
-            }
+            try? Self.writeAll(Self.errorResponse, to: clientFD)
         }
     }
 }
@@ -193,6 +188,7 @@ public enum VortexServiceControlClient {
         guard fd >= 0 else { return false }
         defer { close(fd) }
         VortexServiceControlServer.disableSIGPIPE(fd)
+        VortexServiceControlServer.setReceiveTimeout(fd, seconds: 2)
 
         var address = sockaddr_un()
         guard VortexServiceControlServer.configure(
@@ -217,10 +213,9 @@ public enum VortexServiceControlClient {
         guard let data = try? JSONEncoder().encode(command) else {
             return false
         }
-        let bytesWritten = data.withUnsafeBytes {
-            write(fd, $0.baseAddress, data.count)
-        }
-        guard bytesWritten == data.count else {
+        do {
+            try VortexServiceControlServer.writeFramedMessage(data, to: fd)
+        } catch {
             return false
         }
 
@@ -269,6 +264,12 @@ extension VortexServiceControlServer {
         return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0
     }
 
+    fileprivate static func setBlocking(_ fd: Int32) -> Bool {
+        let flags = fcntl(fd, F_GETFL, 0)
+        guard flags >= 0 else { return false }
+        return fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0
+    }
+
     fileprivate static func disableSIGPIPE(_ fd: Int32) {
         var value: Int32 = 1
         setsockopt(
@@ -278,5 +279,101 @@ extension VortexServiceControlServer {
             &value,
             socklen_t(MemoryLayout<Int32>.size)
         )
+    }
+
+    fileprivate static func setReceiveTimeout(_ fd: Int32, seconds: Int) {
+        var timeout = timeval(tv_sec: seconds, tv_usec: 0)
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &timeout,
+            socklen_t(MemoryLayout<timeval>.size)
+        )
+    }
+
+    fileprivate static func writeFramedMessage(_ data: Data, to fd: Int32) throws {
+        guard data.count <= maxMessageBytes else {
+            throw VortexServiceControlError.messageTooLarge
+        }
+
+        var length = UInt32(data.count).bigEndian
+        let lengthData = withUnsafeBytes(of: &length) { Data($0) }
+        try writeAll(lengthData, to: fd)
+        try writeAll(data, to: fd)
+    }
+
+    fileprivate static func readFramedMessage(from fd: Int32) throws -> Data {
+        let lengthData = try readExactly(byteCount: MemoryLayout<UInt32>.size, from: fd)
+        var rawLength: UInt32 = 0
+        _ = withUnsafeMutableBytes(of: &rawLength) { buffer in
+            lengthData.copyBytes(to: buffer)
+        }
+
+        let length = Int(UInt32(bigEndian: rawLength))
+        guard length > 0, length <= maxMessageBytes else {
+            throw VortexServiceControlError.invalidMessageLength(length)
+        }
+
+        return try readExactly(byteCount: length, from: fd)
+    }
+
+    fileprivate static func writeAll(_ data: Data, to fd: Int32) throws {
+        try data.withUnsafeBytes { buffer in
+            guard let baseAddress = buffer.baseAddress else { return }
+            var offset = 0
+            while offset < data.count {
+                let result = write(fd, baseAddress.advanced(by: offset), data.count - offset)
+                if result > 0 {
+                    offset += result
+                } else if result < 0, errno == EINTR {
+                    continue
+                } else if result < 0 {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                } else {
+                    throw VortexServiceControlError.connectionClosed
+                }
+            }
+        }
+    }
+
+    fileprivate static func readExactly(byteCount: Int, from fd: Int32) throws -> Data {
+        var data = [UInt8](repeating: 0, count: byteCount)
+        var offset = 0
+
+        while offset < byteCount {
+            let remaining = byteCount - offset
+            let result = data.withUnsafeMutableBytes { buffer in
+                read(fd, buffer.baseAddress!.advanced(by: offset), remaining)
+            }
+            if result > 0 {
+                offset += result
+            } else if result == 0 {
+                throw VortexServiceControlError.connectionClosed
+            } else if errno == EINTR {
+                continue
+            } else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        }
+
+        return Data(data)
+    }
+}
+
+private enum VortexServiceControlError: LocalizedError {
+    case connectionClosed
+    case invalidMessageLength(Int)
+    case messageTooLarge
+
+    var errorDescription: String? {
+        switch self {
+        case .connectionClosed:
+            return "control socket closed before the full message was transferred"
+        case .invalidMessageLength(let length):
+            return "invalid control message length \(length)"
+        case .messageTooLarge:
+            return "control message exceeds the maximum supported size"
+        }
     }
 }
