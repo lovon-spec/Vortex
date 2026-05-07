@@ -76,7 +76,7 @@ final class VmnetNetworkRegistry {
     ) -> VortexError {
         VortexError.networkConfigurationFailed(
             reason: "Failed to \(action): \(statusDescription(status)). "
-                + "vmnet networks require macOS 26.0+ and the com.apple.vm.networking entitlement."
+                + "vmnet networks require macOS 26.0+ and a launchable Virtualization.framework entitlement set."
         )
     }
 

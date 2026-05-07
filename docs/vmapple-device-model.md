@@ -683,6 +683,12 @@ Full entitlement list of this binary:
 - `com.apple.usb.hostcontrollerinterface`
 - `com.apple.private.security.message-filter`
 
+These are entitlements on Apple's Virtualization.framework XPC service, not a
+template for Vortex's own development entitlements. In particular, do not add
+`com.apple.vm.networking` to ad-hoc-signed Vortex builds; current macOS builds
+are launchable and can create vmnet shared networks with the public
+Virtualization.framework entitlement set.
+
 ### 7.2 What It Enables
 
 The entitlement gates the vmapple device model in Hypervisor.framework. Based on
@@ -716,8 +722,9 @@ production.** Requires SIP disabled and is development-only.
   uses Hypervisor.framework with its own VMM.
 
 - **Apple Developer Forums** show no formal process for requesting private HV
-  entitlements. The `com.apple.vm.networking` entitlement (also restricted) can be
-  requested through Apple Developer relations, but `vmapple` has not been mentioned.
+  entitlements. Restricted networking entitlements may exist for Apple-reviewed
+  distribution scenarios, but Vortex's ad-hoc development path should not carry
+  `com.apple.vm.networking`; on current macOS hosts it prevents launch.
 
 - **Enterprise/Partner Programs** -- Apple has worked closely with Parallels (confirmed
   by KB articles stating they "work closely with Apple"), but this appears to be a

@@ -18,6 +18,7 @@ import Virtualization
 import VortexAudio
 import VortexCore
 import VortexPersistence
+import VortexService
 import VortexVZ
 
 struct StartVMCommand: ParsableCommand {
@@ -34,6 +35,10 @@ struct StartVMCommand: ParsableCommand {
 
             The guest must have the Vortex audio daemon installed and running \
             to establish the vsock audio connection.
+
+            If a Vortex GUI service is already running, this command delegates \
+            the start request to that process so Virtualization.framework and \
+            vmnet state stay owned by one VM service.
             """
     )
 
@@ -87,6 +92,17 @@ struct StartVMCommand: ParsableCommand {
         guard let vmID = UUID(uuidString: vm) else {
             print("error: '\(vm)' is not a valid UUID.")
             throw ExitCode.validationFailure
+        }
+
+        let startOptions = VortexVMStartOptions(audioOverride: serviceAudioOverride)
+        let command = VortexServiceCommand(
+            kind: .openVM,
+            vmID: vmID,
+            startOptions: startOptions.hasOverrides ? startOptions : nil
+        )
+        if VortexServiceControlClient.forwardToRunningService(command) {
+            print("Requested running Vortex service to start/open VM \(vmID.uuidString).")
+            return
         }
 
         let repository = VMRepository()
@@ -307,6 +323,17 @@ struct StartVMCommand: ParsableCommand {
             enabled: true,
             output: outputEndpoint,
             input: inputEndpoint
+        )
+    }
+
+    private var serviceAudioOverride: VortexAudioOverride? {
+        guard noAudio || audioOutput != nil || audioInput != nil else {
+            return nil
+        }
+        return VortexAudioOverride(
+            disableAudio: noAudio,
+            outputDeviceName: audioOutput,
+            inputDeviceName: audioInput
         )
     }
 }

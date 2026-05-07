@@ -106,6 +106,11 @@ The VZ XPC service has these entitlements (extracted from the binary):
 | `com.apple.usb.hostcontrollerinterface` | USB host controller passthrough |
 | `com.apple.private.security.message-filter` | Security message filtering |
 
+These are entitlements on Apple's XPC service. They should not be copied into
+Vortex's ad-hoc development entitlements. Current Vortex dev builds use the
+public Virtualization.framework entitlement set; adding `com.apple.vm.networking`
+prevents launch on the host where vmnet shared networking was validated.
+
 **Critical finding:** The `com.apple.private.hypervisor.vmapple` entitlement is
 what unlocks the ability to boot macOS guests. This is a **private entitlement**
 that third-party developers cannot obtain through normal channels. It likely

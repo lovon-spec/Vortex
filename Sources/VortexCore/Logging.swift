@@ -23,6 +23,7 @@ import os
 /// - `vm`: VM lifecycle, vCPU events, memory mapping, device emulation.
 /// - `bridge`: Vsock/TCP audio transport between guest and host.
 /// - `gui`: SwiftUI application events, window management.
+/// - `service`: VM owner service and local process control.
 /// - `cli`: Command-line interface operations.
 /// - `hv`: Hypervisor.framework operations, low-level VMM events.
 /// - `boot`: Firmware loading, IPSW extraction, boot chain.
@@ -39,6 +40,9 @@ public enum VortexLog {
 
     /// GUI application: window management, view model state.
     public static let gui = Logger(subsystem: "com.vortex", category: "gui")
+
+    /// VM owner service: single-process VM lifecycle and local control socket.
+    public static let service = Logger(subsystem: "com.vortex", category: "service")
 
     /// CLI operations: command parsing, user-facing status.
     public static let cli = Logger(subsystem: "com.vortex", category: "cli")

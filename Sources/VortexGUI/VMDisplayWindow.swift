@@ -8,6 +8,7 @@
 import SwiftUI
 import Virtualization
 import VortexCore
+import VortexService
 
 // MARK: - VMDisplayWindow
 

@@ -13,12 +13,14 @@
 // Design: dark appearance, native Cocoa, transparent titlebar tinted dark.
 // Inspired by the Intendant macOS app aesthetic.
 
+import Darwin
 import os
 import SwiftUI
 import Virtualization
 import VortexAudio
 import VortexCore
 import VortexPersistence
+import VortexService
 import VortexVZ
 
 // MARK: - App Entry Point
@@ -26,43 +28,48 @@ import VortexVZ
 @main
 struct VortexApp: App {
     @NSApplicationDelegateAdaptor(VortexAppDelegate.self) var appDelegate
-    @State private var viewModel = VMLibraryViewModel()
+    @State private var serviceHost: VortexGUIServiceHost
 
-    /// If a UUID was passed on the command line, open its display directly.
-    private var launchVMID: UUID? {
-        let args = ProcessInfo.processInfo.arguments
-        guard args.count > 1 else { return nil }
-        return UUID(uuidString: args[1])
+    @MainActor
+    init() {
+        let command = VortexServiceCommand.launchCommand(
+            arguments: ProcessInfo.processInfo.arguments
+        )
+
+        if VortexServiceControlClient.forwardToRunningService(command) {
+            exit(0)
+        }
+
+        let host = VortexGUIServiceHost(initialCommand: command)
+        if !host.isControlServerRunning,
+           VortexServiceControlClient.forwardToRunningService(command) {
+            exit(0)
+        }
+
+        self._serviceHost = State(initialValue: host)
     }
 
     var body: some Scene {
         // Main library window
         Window("Vortex", id: "library") {
-            VMLibraryView()
-                .environment(viewModel)
+            VMLibraryView(serviceHost: serviceHost)
+                .environment(serviceHost.viewModel)
                 .onAppear {
                     configureMainWindow()
-                    // If launched with a VM UUID, open its display window.
-                    if let vmID = launchVMID {
-                        Task {
-                            viewModel.loadConfigurations()
-                            await viewModel.bootVM(id: vmID)
-                        }
-                    }
                 }
         }
         .defaultSize(width: 900, height: 600)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("New VM...") {
-                    viewModel.showCreationWizard = true
+                    serviceHost.viewModel.showCreationWizard = true
                 }
                 .keyboardShortcut("n", modifiers: .command)
             }
 
             CommandGroup(after: .sidebar) {
                 Button("Refresh VM List") {
-                    viewModel.refresh()
+                    serviceHost.viewModel.refresh()
                 }
                 .keyboardShortcut("r", modifiers: .command)
             }
@@ -72,7 +79,7 @@ struct VortexApp: App {
         WindowGroup("VM Display", for: UUID.self) { $vmID in
             if let vmID = vmID {
                 VMDisplayWindow(vmID: vmID)
-                    .environment(viewModel)
+                    .environment(serviceHost.viewModel)
             } else {
                 Text("Invalid VM ID")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

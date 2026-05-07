@@ -1,10 +1,11 @@
 // VMController.swift -- Per-VM lifecycle controller with audio bridge management.
-// VortexGUI
+// VortexService
 //
 // Owns a VZVirtualMachine instance and exposes its state for the UI.
 // Handles start/stop/pause/resume and audio bridge attach/detach.
 
 import Foundation
+import Observation
 import Virtualization
 import VortexAudio
 import VortexCore
@@ -23,33 +24,33 @@ import VortexVZ
 /// - Guest connection state and audio device hot-plug monitoring
 @MainActor
 @Observable
-final class VMController: Identifiable {
-    let id: UUID
-    let vm: VZVirtualMachine
-    let manager: VZVMManager
-    var config: VMConfiguration
+public final class VMController: Identifiable {
+    public let id: UUID
+    public let vm: VZVirtualMachine
+    public let manager: VZVMManager
+    public var config: VMConfiguration
 
-    var stateLabel: String = "Stopped"
-    var isRunning: Bool = false
-    var isPaused: Bool = false
-    var canStart: Bool = true
-    var canStop: Bool = false
-    var errorMessage: String?
-    var showAudioSettings: Bool = false
+    public var stateLabel: String = "Stopped"
+    public var isRunning: Bool = false
+    public var isPaused: Bool = false
+    public var canStart: Bool = true
+    public var canStop: Bool = false
+    public var errorMessage: String?
+    public var showAudioSettings: Bool = false
 
     /// Whether the guest audio daemon has connected to the bridge.
     ///
     /// True when the bridge reports that a guest daemon has connected
     /// and sent a CONFIGURE + START sequence. Derived from the bridge's
     /// `isStreaming` property, polled periodically while the VM runs.
-    var isGuestConnected: Bool = false
+    public var isGuestConnected: Bool = false
 
     /// Warning message shown when a configured audio device disappears.
     /// Cleared when the device reappears or when audio settings change.
-    var audioDeviceWarning: String?
+    public var audioDeviceWarning: String?
 
     /// Human-readable summary of the current audio routing.
-    var audioRoutingSummary: String {
+    public var audioRoutingSummary: String {
         guard config.audio.enabled else { return "Audio disabled" }
 
         let outputName = config.audio.output?.hostDeviceName
@@ -69,7 +70,7 @@ final class VMController: Identifiable {
     private var bridgePollingTask: Task<Void, Never>?
     private var deviceWatcher: AudioDeviceEnumerator?
 
-    init(vm: VZVirtualMachine, manager: VZVMManager, config: VMConfiguration) {
+    public init(vm: VZVirtualMachine, manager: VZVMManager, config: VMConfiguration) {
         self.id = config.id
         self.vm = vm
         self.manager = manager
@@ -93,7 +94,7 @@ final class VMController: Identifiable {
 
     // MARK: - Lifecycle
 
-    func start() async {
+    public func start() async {
         guard vm.canStart else { return }
         stateLabel = "Starting"
         canStart = false
@@ -110,7 +111,7 @@ final class VMController: Identifiable {
         }
     }
 
-    func stop() async {
+    public func stop() async {
         guard vm.canRequestStop || vm.canStop else { return }
         stateLabel = "Stopping"
         canStop = false
@@ -125,7 +126,7 @@ final class VMController: Identifiable {
         }
     }
 
-    func pause() async {
+    public func pause() async {
         guard vm.canPause else { return }
         do {
             try await manager.pause(vm)
@@ -135,7 +136,7 @@ final class VMController: Identifiable {
         }
     }
 
-    func resume() async {
+    public func resume() async {
         guard vm.canResume else { return }
         do {
             try await manager.resume(vm)
@@ -151,18 +152,18 @@ final class VMController: Identifiable {
         let audioConfig = config.audio
 
         guard audioConfig.enabled else {
-            VortexLog.gui.info("Audio is disabled in VM config, skipping vsock bridge")
+            VortexLog.service.info("Audio is disabled in VM config, skipping vsock bridge")
             return
         }
 
         guard audioConfig.output != nil || audioConfig.input != nil else {
-            VortexLog.gui.info("No audio devices configured -- open Audio Settings to select devices")
+            VortexLog.service.info("No audio devices configured -- open Audio Settings to select devices")
             return
         }
 
-        VortexLog.gui.debug("VM socket devices: \(self.vm.socketDevices.count)")
+        VortexLog.service.debug("VM socket devices: \(self.vm.socketDevices.count)")
         for (i, dev) in vm.socketDevices.enumerated() {
-            VortexLog.gui.debug("  device[\(i)]: \(String(describing: type(of: dev)))")
+            VortexLog.service.debug("  device[\(i)]: \(String(describing: type(of: dev)))")
         }
 
         let bridge = VsockAudioBridge(vmID: config.id)
@@ -174,10 +175,10 @@ final class VMController: Identifiable {
                 guard let self = self else { return }
                 if disconnected {
                     self.audioDeviceWarning = "\(direction.rawValue.capitalized) device disconnected: \(uid)"
-                    VortexLog.gui.warning("Audio device disconnected (\(direction.rawValue)): \(uid)")
+                    VortexLog.service.warning("Audio device disconnected (\(direction.rawValue)): \(uid)")
                 } else {
                     self.audioDeviceWarning = nil
-                    VortexLog.gui.info("Audio device reconnected (\(direction.rawValue)): \(uid)")
+                    VortexLog.service.info("Audio device reconnected (\(direction.rawValue)): \(uid)")
                 }
             }
         }
@@ -185,10 +186,10 @@ final class VMController: Identifiable {
         do {
             try bridge.attach(to: vm, audioConfig: audioConfig)
             self.audioBridge = bridge
-            VortexLog.gui.info("Vsock audio bridge attached -- output: \(audioConfig.output?.hostDeviceName ?? "none"), input: \(audioConfig.input?.hostDeviceName ?? "none")")
-            VortexLog.gui.info("Listening on vsock port 5198 for guest daemon connection")
+            VortexLog.service.info("Vsock audio bridge attached -- output: \(audioConfig.output?.hostDeviceName ?? "none"), input: \(audioConfig.input?.hostDeviceName ?? "none")")
+            VortexLog.service.info("Listening on vsock port 5198 for guest daemon connection")
         } catch {
-            VortexLog.gui.error("Failed to attach vsock bridge: \(error)")
+            VortexLog.service.error("Failed to attach vsock bridge: \(error)")
             errorMessage = "Audio bridge failed: \(error.localizedDescription)"
         }
     }
@@ -204,11 +205,11 @@ final class VMController: Identifiable {
     /// Persists the current audio config to disk and restarts the audio bridge.
     ///
     /// Called by `AudioSettingsView` when the user presses Apply.
-    func applyAudioSettings() {
+    public func applyAudioSettings() {
         let repo = VMRepository()
         do {
             try repo.update(config)
-            VortexLog.gui.info("Audio config saved for VM \(self.config.id)")
+            VortexLog.service.info("Audio config saved for VM \(self.config.id)")
         } catch {
             errorMessage = "Failed to save audio settings: \(error.localizedDescription)"
             return
@@ -305,11 +306,11 @@ final class VMController: Identifiable {
             // Clear warning only if it was a device-related one.
             if audioDeviceWarning != nil {
                 audioDeviceWarning = nil
-                VortexLog.gui.info("All configured audio devices are present")
+                VortexLog.service.info("All configured audio devices are present")
             }
         } else {
             audioDeviceWarning = warnings.joined(separator: "; ")
-            VortexLog.gui.warning("Audio device(s) missing: \(warnings.joined(separator: ", "))")
+            VortexLog.service.warning("Audio device(s) missing: \(warnings.joined(separator: ", "))")
         }
     }
 
@@ -323,7 +324,7 @@ final class VMController: Identifiable {
         canStop = state.canStop
     }
 
-    func updateFromVZState() {
+    public func updateFromVZState() {
         let vzState = vm.state
         stateLabel = vzStateName(vzState).capitalized
         isRunning = (vzState == .running)

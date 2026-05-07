@@ -164,6 +164,16 @@ let package = Package(
             ]
         ),
 
+        // MARK: - VM owner service and local control plane
+        .target(
+            name: "VortexService",
+            dependencies: ["VortexCore", "VortexAudio", "VortexPersistence", "VortexVZ"],
+            path: "Sources/VortexService",
+            linkerSettings: [
+                .linkedFramework("Virtualization"),
+            ]
+        ),
+
         // MARK: - CFishHook (C library for Mach-O symbol rebinding)
         .target(
             name: "CFishHook",
@@ -210,6 +220,7 @@ let package = Package(
                 "VortexCore",
                 "VortexAudio",
                 "VortexPersistence",
+                "VortexService",
                 "VortexVZ",
             ],
             path: "Sources/VortexGUI",
@@ -231,6 +242,7 @@ let package = Package(
                 "VortexAudio",
                 "VortexBoot",
                 "VortexPersistence",
+                "VortexService",
                 "VortexVZ",
                 "VortexInterception",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),

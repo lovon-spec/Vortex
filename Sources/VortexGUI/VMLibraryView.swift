@@ -5,15 +5,23 @@
 // and a detail pane showing the selected VM's info and action buttons.
 // Includes toolbar buttons for creating new VMs and accessing VM settings.
 
+import AppKit
 import SwiftUI
 import VortexCore
+import VortexService
 
 // MARK: - VMLibraryView
 
 /// The main library window showing all VMs in a sidebar/detail layout.
 struct VMLibraryView: View {
+    let serviceHost: VortexGUIServiceHost
     @Environment(VMLibraryViewModel.self) private var viewModel
     @Environment(\.openWindow) private var openWindow
+    @State private var didInstallCommandHandler = false
+
+    init(serviceHost: VortexGUIServiceHost) {
+        self.serviceHost = serviceHost
+    }
 
     var body: some View {
         @Bindable var vm = viewModel
@@ -27,6 +35,7 @@ struct VMLibraryView: View {
         .frame(minWidth: 700, minHeight: 450)
         .task {
             viewModel.loadConfigurations()
+            installCommandHandlerIfNeeded()
         }
         .sheet(isPresented: $vm.showCreationWizard) {
             VMCreationWizard(
@@ -61,6 +70,32 @@ struct VMLibraryView: View {
                         viewModel.showSettings = false
                     }
                 )
+            }
+        }
+    }
+
+    private func installCommandHandlerIfNeeded() {
+        guard !didInstallCommandHandler else { return }
+        didInstallCommandHandler = true
+        serviceHost.installCommandHandler { command in
+            handleControlCommand(command)
+        }
+    }
+
+    @MainActor
+    private func handleControlCommand(_ command: VortexServiceCommand) {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "library")
+
+        switch command.kind {
+        case .activate:
+            return
+        case .openVM:
+            guard let vmID = command.vmID else { return }
+            viewModel.selectedVMID = vmID
+            openWindow(value: vmID)
+            Task {
+                await viewModel.bootVM(id: vmID, startOptions: command.startOptions)
             }
         }
     }

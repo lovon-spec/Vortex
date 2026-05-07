@@ -1,17 +1,38 @@
 // VMLibraryViewModel.swift -- Central state for the VM library and running VMs.
-// VortexGUI
+// VortexService
 //
 // Owns the list of VMConfiguration objects loaded from disk, tracks which VMs
 // are currently running (each with a VMController), and provides methods to
 // boot, stop, and manage VMs from the library.
 
 import Foundation
+import Observation
 import Virtualization
+import VortexAudio
 import VortexCore
 import VortexPersistence
 import VortexVZ
 
 // MARK: - VMLibraryViewModel
+
+public enum VortexServiceError: LocalizedError {
+    case outputDeviceNotFound(String, available: [String])
+    case inputDeviceNotFound(String, available: [String])
+    case audioDeviceEnumerationFailed(Error)
+
+    public var errorDescription: String? {
+        switch self {
+        case .outputDeviceNotFound(let name, let available):
+            let list = available.isEmpty ? "No output devices are available." : available.joined(separator: ", ")
+            return "Output audio device '\(name)' was not found. Available output devices: \(list)"
+        case .inputDeviceNotFound(let name, let available):
+            let list = available.isEmpty ? "No input devices are available." : available.joined(separator: ", ")
+            return "Input audio device '\(name)' was not found. Available input devices: \(list)"
+        case .audioDeviceEnumerationFailed(let error):
+            return "Failed to enumerate host audio devices: \(error.localizedDescription)"
+        }
+    }
+}
 
 /// Single source of truth for the VM library and all running VM controllers.
 ///
@@ -23,39 +44,39 @@ import VortexVZ
 /// - Creates, deletes, and updates VM configurations
 @MainActor
 @Observable
-final class VMLibraryViewModel {
+public final class VMLibraryViewModel {
 
     // MARK: - Published state
 
     /// All VM configurations loaded from disk.
-    var configurations: [VMConfiguration] = []
+    public var configurations: [VMConfiguration] = []
 
     /// Currently selected VM ID in the sidebar.
-    var selectedVMID: UUID?
+    public var selectedVMID: UUID?
 
     /// Maps VM ID to its running controller. Only populated while a VM is running.
-    var runningControllers: [UUID: VMController] = [:]
+    public var runningControllers: [UUID: VMController] = [:]
 
     /// Error message to display in the library view.
-    var errorMessage: String?
+    public var errorMessage: String?
 
     /// True while the initial load is in progress.
-    var isLoading: Bool = true
+    public var isLoading: Bool = true
 
     /// Set of VM IDs that have open display windows.
-    var openDisplayWindows: Set<UUID> = []
+    public var openDisplayWindows: Set<UUID> = []
 
     /// Whether to show the VM creation wizard sheet.
-    var showCreationWizard: Bool = false
+    public var showCreationWizard: Bool = false
 
     /// Whether to show the VM import sheet.
-    var showImportSheet: Bool = false
+    public var showImportSheet: Bool = false
 
     /// Whether to show the VM settings sheet.
-    var showSettings: Bool = false
+    public var showSettings: Bool = false
 
     /// Whether to show the delete confirmation alert.
-    var showDeleteConfirmation: Bool = false
+    public var showDeleteConfirmation: Bool = false
 
     // MARK: - Dependencies
 
@@ -66,25 +87,27 @@ final class VMLibraryViewModel {
     // MARK: - Computed
 
     /// The currently selected configuration, if any.
-    var selectedConfig: VMConfiguration? {
+    public init() {}
+
+    public var selectedConfig: VMConfiguration? {
         guard let id = selectedVMID else { return nil }
         return configurations.first(where: { $0.id == id })
     }
 
     /// Whether a given VM is currently running.
-    func isRunning(_ id: UUID) -> Bool {
+    public func isRunning(_ id: UUID) -> Bool {
         runningControllers[id] != nil
     }
 
     /// Returns the controller for a running VM, if it exists.
-    func controller(for id: UUID) -> VMController? {
+    public func controller(for id: UUID) -> VMController? {
         runningControllers[id]
     }
 
     // MARK: - Load
 
     /// Loads all VM configurations from disk.
-    func loadConfigurations() {
+    public func loadConfigurations() {
         isLoading = true
         errorMessage = nil
         do {
@@ -97,7 +120,7 @@ final class VMLibraryViewModel {
     }
 
     /// Reloads the configuration list from disk.
-    func refresh() {
+    public func refresh() {
         loadConfigurations()
     }
 
@@ -106,13 +129,22 @@ final class VMLibraryViewModel {
     /// Creates a VM from the given configuration and prepares a controller.
     /// Returns the controller but does NOT start the VM yet -- the display
     /// window should call start() after it appears.
-    func prepareVM(id: UUID) throws -> VMController {
+    public func prepareVM(
+        id: UUID,
+        startOptions: VortexVMStartOptions? = nil
+    ) throws -> VMController {
         // If already running, return existing controller.
         if let existing = runningControllers[id] {
+            if startOptions?.hasOverrides == true {
+                VortexLog.service.warning("Ignoring start options for already running VM \(id)")
+            }
             return existing
         }
 
-        let config = try repo.load(id: id)
+        var config = try repo.load(id: id)
+        if let startOptions {
+            config = try applying(startOptions: startOptions, to: config)
+        }
         let vm = try manager.createVM(config: config)
         let controller = VMController(
             vm: vm,
@@ -124,9 +156,9 @@ final class VMLibraryViewModel {
     }
 
     /// Boots a VM: creates it, registers the controller, and starts execution.
-    func bootVM(id: UUID) async {
+    public func bootVM(id: UUID, startOptions: VortexVMStartOptions? = nil) async {
         do {
-            let controller = try prepareVM(id: id)
+            let controller = try prepareVM(id: id, startOptions: startOptions)
             try await Task.sleep(for: .milliseconds(200))
             await controller.start()
         } catch {
@@ -135,21 +167,21 @@ final class VMLibraryViewModel {
     }
 
     /// Stops a running VM and removes its controller.
-    func stopVM(id: UUID) async {
+    public func stopVM(id: UUID) async {
         guard let controller = runningControllers[id] else { return }
         await controller.stop()
         runningControllers.removeValue(forKey: id)
     }
 
     /// Removes the controller for a VM that has already stopped.
-    func cleanupController(for id: UUID) {
+    public func cleanupController(for id: UUID) {
         runningControllers.removeValue(forKey: id)
     }
 
     // MARK: - VM Status
 
     /// Returns the runtime state label for a VM.
-    func stateLabel(for id: UUID) -> String {
+    public func stateLabel(for id: UUID) -> String {
         if let controller = runningControllers[id] {
             return controller.stateLabel
         }
@@ -157,7 +189,7 @@ final class VMLibraryViewModel {
     }
 
     /// Returns a status color name for a VM (green=running, yellow=paused, gray=stopped).
-    func statusColor(for id: UUID) -> StatusLED {
+    public func statusColor(for id: UUID) -> StatusLED {
         guard let controller = runningControllers[id] else {
             return .stopped
         }
@@ -167,7 +199,7 @@ final class VMLibraryViewModel {
     }
 
     /// Status LED states for the sidebar.
-    enum StatusLED {
+    public enum StatusLED {
         case running
         case paused
         case stopped
@@ -179,22 +211,22 @@ final class VMLibraryViewModel {
     ///
     /// The configuration and its on-disk bundle are assumed to already exist
     /// (created by the wizard). This method refreshes the in-memory list.
-    func addCreatedVM(_ config: VMConfiguration) {
+    public func addCreatedVM(_ config: VMConfiguration) {
         loadConfigurations()
         selectedVMID = config.id
         showCreationWizard = false
-        VortexLog.gui.info("VM added to library: \(config.identity.name)")
+        VortexLog.service.info("VM added to library: \(config.identity.name)")
     }
 
     /// Adds an imported VM configuration to the library and selects it.
     ///
     /// The configuration and its on-disk bundle are assumed to already exist
     /// (created by the import sheet). This method refreshes the in-memory list.
-    func addImportedVM(_ config: VMConfiguration) {
+    public func addImportedVM(_ config: VMConfiguration) {
         loadConfigurations()
         selectedVMID = config.id
         showImportSheet = false
-        VortexLog.gui.info("VM imported to library: \(config.identity.name)")
+        VortexLog.service.info("VM imported to library: \(config.identity.name)")
     }
 
     // MARK: - Delete
@@ -203,7 +235,7 @@ final class VMLibraryViewModel {
     ///
     /// The VM must be stopped before deletion. If it is running, the error
     /// message is set and the VM is not deleted.
-    func deleteVM(id: UUID) {
+    public func deleteVM(id: UUID) {
         guard !isRunning(id) else {
             errorMessage = "Cannot delete a running VM. Stop it first."
             return
@@ -215,34 +247,34 @@ final class VMLibraryViewModel {
             if selectedVMID == id {
                 selectedVMID = configurations.first?.id
             }
-            VortexLog.gui.info("VM deleted: \(id)")
+            VortexLog.service.info("VM deleted: \(id)")
         } catch {
             errorMessage = "Failed to delete VM: \(error.localizedDescription)"
-            VortexLog.gui.error("VM deletion failed: \(error.localizedDescription)")
+            VortexLog.service.error("VM deletion failed: \(error.localizedDescription)")
         }
     }
 
     // MARK: - Update
 
     /// Persists an updated configuration and refreshes the in-memory list.
-    func updateVM(_ config: VMConfiguration) {
+    public func updateVM(_ config: VMConfiguration) {
         do {
             try repo.update(config)
             // Replace in the local list.
             if let index = configurations.firstIndex(where: { $0.id == config.id }) {
                 configurations[index] = config.touchingModifiedDate()
             }
-            VortexLog.gui.info("VM updated: \(config.identity.name)")
+            VortexLog.service.info("VM updated: \(config.identity.name)")
         } catch {
             errorMessage = "Failed to update VM: \(error.localizedDescription)"
-            VortexLog.gui.error("VM update failed: \(error.localizedDescription)")
+            VortexLog.service.error("VM update failed: \(error.localizedDescription)")
         }
     }
 
     // MARK: - OS Install Check
 
     /// Returns true if a macOS VM needs an OS install (disk is empty/sparse).
-    func needsOSInstall(for config: VMConfiguration) -> Bool {
+    public func needsOSInstall(for config: VMConfiguration) -> Bool {
         guard config.guestOS == .macOS else { return false }
         guard let disk = config.storage.bootDisk else { return true }
 
@@ -259,7 +291,73 @@ final class VMLibraryViewModel {
     }
 
     /// Returns true when the VM references files outside its own bundle.
-    func usesExternalResources(for config: VMConfiguration) -> Bool {
+    public func usesExternalResources(for config: VMConfiguration) -> Bool {
         config.usesExternalResources(bundlePath: fileManager.vmBundlePath(for: config.id))
+    }
+
+    private func applying(
+        startOptions: VortexVMStartOptions,
+        to config: VMConfiguration
+    ) throws -> VMConfiguration {
+        var updated = config
+        if let audioOverride = startOptions.audioOverride {
+            updated.audio = try resolveAudioOverride(audioOverride)
+        }
+        return updated
+    }
+
+    private func resolveAudioOverride(_ override: VortexAudioOverride) throws -> AudioConfig {
+        if override.disableAudio {
+            return .disabled
+        }
+
+        guard override.outputDeviceName != nil || override.inputDeviceName != nil else {
+            return .systemDefaults
+        }
+
+        let enumerator = AudioDeviceEnumerator()
+        let devices: [AudioHostDevice]
+        do {
+            devices = try enumerator.allDevices()
+        } catch {
+            throw VortexServiceError.audioDeviceEnumerationFailed(error)
+        }
+
+        var outputEndpoint: AudioEndpointConfig?
+        var inputEndpoint: AudioEndpointConfig?
+
+        if let outputName = override.outputDeviceName {
+            guard let device = devices.first(where: { $0.name == outputName && $0.isOutput }) else {
+                let available = devices
+                    .filter(\.isOutput)
+                    .map(\.name)
+                    .sorted()
+                throw VortexServiceError.outputDeviceNotFound(outputName, available: available)
+            }
+            outputEndpoint = AudioEndpointConfig(
+                hostDeviceUID: device.uid,
+                hostDeviceName: device.name
+            )
+        }
+
+        if let inputName = override.inputDeviceName {
+            guard let device = devices.first(where: { $0.name == inputName && $0.isInput }) else {
+                let available = devices
+                    .filter(\.isInput)
+                    .map(\.name)
+                    .sorted()
+                throw VortexServiceError.inputDeviceNotFound(inputName, available: available)
+            }
+            inputEndpoint = AudioEndpointConfig(
+                hostDeviceUID: device.uid,
+                hostDeviceName: device.name
+            )
+        }
+
+        return AudioConfig(
+            enabled: true,
+            output: outputEndpoint,
+            input: inputEndpoint
+        )
     }
 }
