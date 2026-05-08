@@ -136,6 +136,20 @@ struct StartVMCommand: ParsableCommand {
         config.audio = audioConfig
         print("")
 
+        let ownerLock: VMOwnerLock
+        do {
+            ownerLock = try VMOwnerLock.acquire(
+                vmID: vmID,
+                fileManager: repository.fileManager
+            )
+        } catch {
+            print("error: \(error.localizedDescription)")
+            throw ExitCode.failure
+        }
+        defer {
+            ownerLock.release()
+        }
+
         // Track state for RunLoop exit.
         var runError: Error?
         var finished = false
@@ -190,12 +204,14 @@ struct StartVMCommand: ParsableCommand {
                         print("")
                         print("VM stopped.")
                         audioBridge?.detach()
+                        ownerLock.release()
                         finished = true
                         CFRunLoopStop(CFRunLoopGetMain())
                     case .error:
                         print("")
                         print("VM encountered an error.")
                         audioBridge?.detach()
+                        ownerLock.release()
                         finished = true
                         CFRunLoopStop(CFRunLoopGetMain())
                     default:
@@ -215,6 +231,7 @@ struct StartVMCommand: ParsableCommand {
                 print("VM is running.")
             } catch {
                 print("error: \(error.localizedDescription)")
+                ownerLock.release()
                 runError = ExitCode.failure
                 finished = true
                 CFRunLoopStop(CFRunLoopGetMain())

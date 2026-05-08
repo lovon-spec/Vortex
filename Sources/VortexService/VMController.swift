@@ -69,12 +69,20 @@ public final class VMController: Identifiable {
     private var audioBridge: VsockAudioBridge?
     private var bridgePollingTask: Task<Void, Never>?
     private var deviceWatcher: AudioDeviceEnumerator?
+    @ObservationIgnored
+    private nonisolated(unsafe) var ownerLock: VMOwnerLock?
 
-    public init(vm: VZVirtualMachine, manager: VZVMManager, config: VMConfiguration) {
+    public init(
+        vm: VZVirtualMachine,
+        manager: VZVMManager,
+        config: VMConfiguration,
+        ownerLock: VMOwnerLock
+    ) {
         self.id = config.id
         self.vm = vm
         self.manager = manager
         self.config = config
+        self.ownerLock = ownerLock
 
         // Wire up the state observer.
         if let observer = manager.stateObserver(for: vm) {
@@ -90,6 +98,10 @@ public final class VMController: Identifiable {
                 }
             }
         }
+    }
+
+    deinit {
+        ownerLock?.release()
     }
 
     // MARK: - Lifecycle
@@ -331,6 +343,11 @@ public final class VMController: Identifiable {
         isPaused = (vzState == .paused)
         canStart = vm.canStart
         canStop = vm.canRequestStop || vm.canStop
+    }
+
+    public func releaseOwnerLock() {
+        ownerLock?.release()
+        ownerLock = nil
     }
 
     private func vzStateName(_ state: VZVirtualMachine.State) -> String {

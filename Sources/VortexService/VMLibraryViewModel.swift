@@ -145,11 +145,21 @@ public final class VMLibraryViewModel {
         if let startOptions {
             config = try applying(startOptions: startOptions, to: config)
         }
-        let vm = try manager.createVM(config: config)
+
+        let ownerLock = try VMOwnerLock.acquire(vmID: id, fileManager: fileManager)
+        let vm: VZVirtualMachine
+        do {
+            vm = try manager.createVM(config: config)
+        } catch {
+            ownerLock.release()
+            throw error
+        }
+
         let controller = VMController(
             vm: vm,
             manager: manager,
-            config: config
+            config: config,
+            ownerLock: ownerLock
         )
         runningControllers[id] = controller
         return controller
@@ -161,6 +171,10 @@ public final class VMLibraryViewModel {
             let controller = try prepareVM(id: id, startOptions: startOptions)
             try await Task.sleep(for: .milliseconds(200))
             await controller.start()
+            if controller.errorMessage != nil && !controller.isRunning && !controller.isPaused {
+                controller.releaseOwnerLock()
+                runningControllers.removeValue(forKey: id)
+            }
         } catch {
             errorMessage = "Failed to boot VM: \(error.localizedDescription)"
         }
@@ -170,11 +184,13 @@ public final class VMLibraryViewModel {
     public func stopVM(id: UUID) async {
         guard let controller = runningControllers[id] else { return }
         await controller.stop()
+        controller.releaseOwnerLock()
         runningControllers.removeValue(forKey: id)
     }
 
     /// Removes the controller for a VM that has already stopped.
     public func cleanupController(for id: UUID) {
+        runningControllers[id]?.releaseOwnerLock()
         runningControllers.removeValue(forKey: id)
     }
 
