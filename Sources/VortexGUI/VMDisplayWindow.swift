@@ -21,12 +21,13 @@ struct VMDisplayWindow: View {
     @State private var controller: VMController?
     @State private var bootError: String?
     @State private var registeredWindow: NSWindow?
-    @State private var isPrimaryDisplayWindow = false
+    @State private var isPrimaryDisplayWindow: Bool?
 
     var body: some View {
         Group {
-            if !isPrimaryDisplayWindow {
-                EmptyView()
+            if isPrimaryDisplayWindow == false {
+                Color.clear
+                    .frame(width: 1, height: 1)
             } else if let controller = controller {
                 VMDisplayContent(controller: controller)
             } else if let error = bootError {
@@ -41,7 +42,7 @@ struct VMDisplayWindow: View {
             }
         }
         .task(id: isPrimaryDisplayWindow) {
-            guard isPrimaryDisplayWindow else { return }
+            guard isPrimaryDisplayWindow == true else { return }
             await prepareAndBoot()
         }
         .onDisappear {

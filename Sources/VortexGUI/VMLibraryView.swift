@@ -19,7 +19,6 @@ struct VMLibraryView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.vmDisplayCoordinator) private var displayCoordinator
     @State private var didInstallCommandHandler = false
-    @State private var libraryWindow: NSWindow?
 
     init(serviceHost: VortexGUIServiceHost) {
         self.serviceHost = serviceHost
@@ -37,7 +36,7 @@ struct VMLibraryView: View {
         .frame(minWidth: 700, minHeight: 450)
         .background {
             WindowAccessor { window in
-                registerLibraryWindow(window)
+                _ = serviceHost.registerLibraryWindow(window)
             }
         }
         .task {
@@ -93,9 +92,9 @@ struct VMLibraryView: View {
     private func handleControlCommand(_ command: VortexServiceCommand) {
         NSApp.activate(ignoringOtherApps: true)
         openWindow(id: "library")
-        focusLibraryWindow()
+        serviceHost.focusLibraryWindow()
         DispatchQueue.main.async {
-            focusLibraryWindow()
+            serviceHost.focusLibraryWindow()
         }
 
         switch command.kind {
@@ -110,32 +109,6 @@ struct VMLibraryView: View {
             }
         }
     }
-
-    @MainActor
-    private func registerLibraryWindow(_ window: NSWindow) {
-        libraryWindow = window
-        window.identifier = .vortexLibraryWindow
-        window.title = "Vortex"
-        window.isReleasedWhenClosed = false
-    }
-
-    @MainActor
-    private func focusLibraryWindow() {
-        let window = libraryWindow
-            ?? NSApp.windows.first(where: { $0.identifier == .vortexLibraryWindow })
-            ?? NSApp.windows.first(where: { $0.title == "Vortex" })
-        guard let window else { return }
-
-        if window.isMiniaturized {
-            window.deminiaturize(nil)
-        }
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-}
-
-private extension NSUserInterfaceItemIdentifier {
-    static let vortexLibraryWindow = NSUserInterfaceItemIdentifier("com.vortex.library")
 }
 
 // MARK: - Sidebar
