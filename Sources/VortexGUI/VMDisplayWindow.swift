@@ -26,7 +26,7 @@ struct VMDisplayWindow: View {
     var body: some View {
         Group {
             if !isPrimaryDisplayWindow {
-                Color.black
+                EmptyView()
             } else if let controller = controller {
                 VMDisplayContent(controller: controller)
             } else if let error = bootError {
@@ -56,14 +56,21 @@ struct VMDisplayWindow: View {
         if let registeredWindow, registeredWindow === window {
             return
         }
-        registeredWindow = window
-        isPrimaryDisplayWindow = displayCoordinator.registerWindow(window, for: vmID)
+        let isPrimary = displayCoordinator.registerWindow(window, for: vmID)
+        isPrimaryDisplayWindow = isPrimary
+        if isPrimary {
+            registeredWindow = window
+            if let controller {
+                window.title = controller.config.identity.name
+            }
+        }
     }
 
     private func prepareAndBoot() async {
         // Check if already running.
         if let existing = viewModel.controller(for: vmID) {
             self.controller = existing
+            registeredWindow?.title = existing.config.identity.name
             return
         }
 
@@ -71,6 +78,7 @@ struct VMDisplayWindow: View {
         do {
             let ctrl = try viewModel.prepareVM(id: vmID)
             self.controller = ctrl
+            registeredWindow?.title = ctrl.config.identity.name
             // Small delay for the window to fully appear before starting.
             try await Task.sleep(for: .milliseconds(300))
             await ctrl.start()

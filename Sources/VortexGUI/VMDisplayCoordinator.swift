@@ -21,9 +21,7 @@ final class VMDisplayCoordinator {
         if let existing = liveWindow(for: vmID), existing !== window {
             existing.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
-            DispatchQueue.main.async {
-                window.close()
-            }
+            closeDuplicateWindow(window)
             return false
         }
 
@@ -49,6 +47,12 @@ final class VMDisplayCoordinator {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         return true
+    }
+
+    @MainActor
+    private func closeDuplicateWindow(_ window: NSWindow) {
+        window.orderOut(nil)
+        window.close()
     }
 
     @MainActor
