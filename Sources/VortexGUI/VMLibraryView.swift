@@ -17,6 +17,7 @@ struct VMLibraryView: View {
     let serviceHost: VortexGUIServiceHost
     @Environment(VMLibraryViewModel.self) private var viewModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.vmDisplayCoordinator) private var displayCoordinator
     @State private var didInstallCommandHandler = false
 
     init(serviceHost: VortexGUIServiceHost) {
@@ -93,7 +94,7 @@ struct VMLibraryView: View {
         case .openVM:
             guard let vmID = command.vmID else { return }
             viewModel.selectedVMID = vmID
-            openWindow(value: vmID)
+            displayCoordinator.openDisplay(for: vmID, openWindow: openWindow)
             Task {
                 await viewModel.bootVM(id: vmID, startOptions: command.startOptions)
             }
@@ -303,6 +304,7 @@ private struct VMDetailContent: View {
     let config: VMConfiguration
     @Environment(VMLibraryViewModel.self) private var viewModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.vmDisplayCoordinator) private var displayCoordinator
 
     private var isRunning: Bool {
         viewModel.isRunning(config.id)
@@ -470,7 +472,7 @@ private struct VMDetailContent: View {
             Spacer()
 
             Button {
-                openWindow(value: config.id)
+                displayCoordinator.openDisplay(for: config.id, openWindow: openWindow)
                 Task {
                     await viewModel.bootVM(id: config.id)
                 }
@@ -612,7 +614,7 @@ private struct VMDetailContent: View {
         HStack(spacing: 12) {
             if !isRunning {
                 Button {
-                    openWindow(value: config.id)
+                    displayCoordinator.openDisplay(for: config.id, openWindow: openWindow)
                     Task {
                         await viewModel.bootVM(id: config.id)
                     }
@@ -655,7 +657,7 @@ private struct VMDetailContent: View {
 
             if isRunning {
                 Button {
-                    openWindow(value: config.id)
+                    displayCoordinator.openDisplay(for: config.id, openWindow: openWindow)
                 } label: {
                     Label("Open Display", systemImage: "rectangle.on.rectangle")
                 }

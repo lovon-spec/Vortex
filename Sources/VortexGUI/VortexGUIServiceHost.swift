@@ -9,6 +9,7 @@ import VortexService
 @Observable
 final class VortexGUIServiceHost {
     let viewModel: VMLibraryViewModel
+    let displayCoordinator = VMDisplayCoordinator()
     private(set) var isControlServerRunning: Bool = false
 
     private let controlServer = VortexServiceControlServer()

@@ -5,6 +5,7 @@
 // with a toolbar for power controls and audio settings, plus a status bar at
 // the bottom showing VM state and audio routing info.
 
+import AppKit
 import SwiftUI
 import Virtualization
 import VortexCore
@@ -16,12 +17,17 @@ import VortexService
 struct VMDisplayWindow: View {
     let vmID: UUID
     @Environment(VMLibraryViewModel.self) private var viewModel
+    @Environment(\.vmDisplayCoordinator) private var displayCoordinator
     @State private var controller: VMController?
     @State private var bootError: String?
+    @State private var registeredWindow: NSWindow?
+    @State private var isPrimaryDisplayWindow = false
 
     var body: some View {
         Group {
-            if let controller = controller {
+            if !isPrimaryDisplayWindow {
+                Color.black
+            } else if let controller = controller {
                 VMDisplayContent(controller: controller)
             } else if let error = bootError {
                 VMBootErrorView(message: error)
@@ -29,9 +35,29 @@ struct VMDisplayWindow: View {
                 VMBootingView()
             }
         }
-        .task {
+        .background {
+            WindowAccessor { window in
+                registerWindowIfNeeded(window)
+            }
+        }
+        .task(id: isPrimaryDisplayWindow) {
+            guard isPrimaryDisplayWindow else { return }
             await prepareAndBoot()
         }
+        .onDisappear {
+            if let registeredWindow {
+                displayCoordinator.unregisterWindow(registeredWindow, for: vmID)
+            }
+        }
+    }
+
+    @MainActor
+    private func registerWindowIfNeeded(_ window: NSWindow) {
+        if let registeredWindow, registeredWindow === window {
+            return
+        }
+        registeredWindow = window
+        isPrimaryDisplayWindow = displayCoordinator.registerWindow(window, for: vmID)
     }
 
     private func prepareAndBoot() async {

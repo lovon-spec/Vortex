@@ -54,6 +54,7 @@ struct VortexApp: App {
         Window("Vortex", id: "library") {
             VMLibraryView(serviceHost: serviceHost)
                 .environment(serviceHost.viewModel)
+                .environment(\.vmDisplayCoordinator, serviceHost.displayCoordinator)
                 .onAppear {
                     configureMainWindow()
                 }
@@ -80,6 +81,7 @@ struct VortexApp: App {
             if let vmID = vmID {
                 VMDisplayWindow(vmID: vmID)
                     .environment(serviceHost.viewModel)
+                    .environment(\.vmDisplayCoordinator, serviceHost.displayCoordinator)
             } else {
                 Text("Invalid VM ID")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -117,6 +119,8 @@ struct VortexApp: App {
 final class VortexAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSWindow.allowsAutomaticWindowTabbing = false
+
         // Appear in the Dock as a proper GUI app.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -126,6 +130,10 @@ final class VortexAppDelegate: NSObject, NSApplicationDelegate {
 
         // Center the main window at 60% of screen.
         centerMainWindow()
+    }
+
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+        false
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
