@@ -154,10 +154,8 @@ struct StartVMCommand: ParsableCommand {
         var runError: Error?
         var finished = false
 
-        // Install SIGINT (Ctrl+C) handler for graceful shutdown.
-        let sigintSource = DispatchSource.makeSignalSource(
-            signal: SIGINT, queue: .main
-        )
+        // Install SIGINT (Ctrl+C) handler after VM creation succeeds.
+        var sigintSource: DispatchSourceSignal?
         signal(SIGINT, SIG_IGN) // Let GCD handle it.
 
         Task { @MainActor in
@@ -191,10 +189,15 @@ struct StartVMCommand: ParsableCommand {
             }
 
             // Wire up Ctrl+C.
-            sigintSource.setEventHandler {
+            let source = DispatchSource.makeSignalSource(
+                signal: SIGINT,
+                queue: .main
+            )
+            source.setEventHandler {
                 shutdown()
             }
-            sigintSource.resume()
+            source.resume()
+            sigintSource = source
 
             // Set up the state observer for VM lifecycle events.
             if let observer = manager.stateObserver(for: vzVM) {
@@ -263,7 +266,7 @@ struct StartVMCommand: ParsableCommand {
             RunLoop.main.run(mode: .default, before: .distantFuture)
         }
 
-        sigintSource.cancel()
+        sigintSource?.cancel()
 
         if let error = runError {
             throw error

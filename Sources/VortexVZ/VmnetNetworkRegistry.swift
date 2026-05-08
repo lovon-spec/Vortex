@@ -140,9 +140,14 @@ public final class VmnetNetworkRegistry {
         }
 
         guard let network = vmnet_network_create(configuration, &status) else {
+            let subnetDescription = ipv4Subnet.map { " with IPv4 subnet \($0.cidrNotation)" } ?? ""
+            let customSubnetHint = ipv4Subnet == nil
+                ? nil
+                : " Custom IPv4 subnet reservation was rejected by macOS; leave IPv4 Subnet blank to use automatic vmnet subnet selection."
             throw makeVmnetError(
-                action: "create \(kind.displayName) network",
-                status: status
+                action: "create \(kind.displayName) network\(subnetDescription)",
+                status: status,
+                hint: customSubnetHint
             )
         }
 
@@ -178,11 +183,14 @@ public final class VmnetNetworkRegistry {
 
     private func makeVmnetError(
         action: String,
-        status: vmnet_return_t
+        status: vmnet_return_t,
+        hint: String? = nil
     ) -> VortexError {
-        VortexError.networkConfigurationFailed(
+        let hintText = hint.map { " \($0)" } ?? ""
+        return VortexError.networkConfigurationFailed(
             reason: "Failed to \(action): \(statusDescription(status)). "
                 + "vmnet networks require macOS 26.0+ and a launchable Virtualization.framework entitlement set."
+                + hintText
         )
     }
 
