@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build & Compile Tests
+    name: Build SDK-neutral targets
     runs-on: macos-15
 
     steps:
@@ -32,14 +32,25 @@ jobs:
       - name: Swift version
         run: swift --version
 
-      - name: Build (debug)
-        run: swift build
-
-      - name: Build tests (compile only)
-        # Tests require Virtualization.framework entitlements and hardware
-        # access that CI runners do not have. We compile them to catch type
-        # errors and missing symbols.
-        run: swift build --build-tests
+      - name: Build SDK-neutral Swift targets
+        # GitHub-hosted macos-15 currently ships Xcode 16.x and the macOS 15
+        # SDK, which does not declare the macOS 26 VZVmnetNetworkDeviceAttachment
+        # and vmnet_network_* APIs used by VortexVZ/VortexService/VortexGUI.
+        # Keep hosted CI useful by validating targets that compile against the
+        # public macOS 15 SDK; run full app builds on a macOS 26 host.
+        run: |
+          set -euo pipefail
+          for target in \
+            VortexCore \
+            VortexPersistence \
+            VortexHV \
+            VortexAudio \
+            VortexDevices \
+            VortexBoot \
+            VortexInterception
+          do
+            swift build --target "$target"
+          done
 
       - name: Build guest tools
         run: make -C GuestTools/VortexAudioPlugin
