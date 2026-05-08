@@ -151,6 +151,7 @@ public final class VMLibraryViewModel {
         do {
             vm = try manager.createVM(config: config)
         } catch {
+            VmnetNetworkRegistry.shared.releaseNetworks(for: config.network.interfaces)
             ownerLock.release()
             throw error
         }

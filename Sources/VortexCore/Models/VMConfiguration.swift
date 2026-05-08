@@ -139,8 +139,8 @@ public struct VMConfiguration: Codable, Identifiable, Sendable, Hashable {
                 if hostInterface.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     issues.append("\(name) has an empty bridged host interface.")
                 }
-            case .vmnetShared(let networkID):
-                if networkID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            case .vmnetShared(let vmnet):
+                if vmnet.networkID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     issues.append("\(name) has an empty shared LAN network ID.")
                 }
             case .nat, .hostOnly:

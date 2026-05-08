@@ -743,10 +743,11 @@ public final class VZVMManager: NSObject {
                     networkID: NetworkMode.defaultVmnetNetworkID
                 )
 
-            case .vmnetShared(let networkID):
+            case .vmnetShared(let vmnet):
                 netConfig.attachment = try VmnetNetworkRegistry.shared.attachment(
                     kind: .shared,
-                    networkID: networkID
+                    networkID: vmnet.normalizedNetworkID,
+                    ipv4Subnet: vmnet.ipv4Subnet
                 )
             }
 

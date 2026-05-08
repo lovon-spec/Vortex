@@ -538,8 +538,8 @@ public final class TrackAVMManager: @unchecked Sendable {
                 }
             case .hostOnly:
                 device.attachment = VZNATNetworkDeviceAttachment()
-            case .vmnetShared(let networkID):
-                logger.warning("vmnet shared network '\(networkID)' is not supported in Track A, using NAT")
+            case .vmnetShared(let vmnet):
+                logger.warning("vmnet shared network '\(vmnet.normalizedNetworkID)' is not supported in Track A, using NAT")
                 device.attachment = VZNATNetworkDeviceAttachment()
             }
 

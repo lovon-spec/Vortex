@@ -49,6 +49,9 @@ public final class VMController: Identifiable {
     /// Cleared when the device reappears or when audio settings change.
     public var audioDeviceWarning: String?
 
+    /// vmnet networks that were reserved while creating this VM.
+    public var vmnetNetworkStatuses: [VmnetNetworkStatus] = []
+
     /// Human-readable summary of the current audio routing.
     public var audioRoutingSummary: String {
         guard config.audio.enabled else { return "Audio disabled" }
@@ -71,6 +74,8 @@ public final class VMController: Identifiable {
     private var deviceWatcher: AudioDeviceEnumerator?
     @ObservationIgnored
     private nonisolated(unsafe) var ownerLock: VMOwnerLock?
+    @ObservationIgnored
+    private var didReleaseVmnetNetworks = false
 
     public init(
         vm: VZVirtualMachine,
@@ -83,6 +88,9 @@ public final class VMController: Identifiable {
         self.manager = manager
         self.config = config
         self.ownerLock = ownerLock
+        self.vmnetNetworkStatuses = VmnetNetworkRegistry.shared.statuses(
+            for: config.network.interfaces
+        )
 
         // Wire up the state observer.
         if let observer = manager.stateObserver(for: vm) {
@@ -346,8 +354,16 @@ public final class VMController: Identifiable {
     }
 
     public func releaseOwnerLock() {
+        releaseVmnetNetworks()
         ownerLock?.release()
         ownerLock = nil
+    }
+
+    private func releaseVmnetNetworks() {
+        guard !didReleaseVmnetNetworks else { return }
+        didReleaseVmnetNetworks = true
+        VmnetNetworkRegistry.shared.releaseNetworks(for: config.network.interfaces)
+        vmnetNetworkStatuses = []
     }
 
     private func vzStateName(_ state: VZVirtualMachine.State) -> String {

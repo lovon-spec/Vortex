@@ -107,6 +107,7 @@ struct VMSettingsView: View {
     @State private var editedConfig: VMConfiguration
     @State private var hasChanges: Bool = false
     @State private var saveError: String?
+    @State private var vmnetIPv4SubnetDrafts: [UUID: String]
 
     // Sharing state
     @State private var showFolderPicker: Bool = false
@@ -122,6 +123,21 @@ struct VMSettingsView: View {
         self.onSave = onSave
         self.onDismiss = onDismiss
         self._editedConfig = State(initialValue: config)
+        self._vmnetIPv4SubnetDrafts = State(
+            initialValue: Self.initialVmnetIPv4SubnetDrafts(for: config)
+        )
+    }
+
+    private static func initialVmnetIPv4SubnetDrafts(
+        for config: VMConfiguration
+    ) -> [UUID: String] {
+        var drafts: [UUID: String] = [:]
+        for iface in config.network.interfaces {
+            if case .vmnetShared(let vmnet) = iface.mode {
+                drafts[iface.id] = vmnet.ipv4Subnet?.cidrNotation ?? ""
+            }
+        }
+        return drafts
     }
 
     var body: some View {
@@ -597,13 +613,25 @@ struct VMSettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
         case .vmnetShared:
-            HStack(spacing: 12) {
-                fieldLabel("Network ID")
-                TextField(
-                    NetworkMode.defaultVmnetNetworkID,
-                    text: vmnetNetworkIDBinding(for: index)
-                )
-                    .textFieldStyle(.roundedBorder)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    fieldLabel("Network ID")
+                    TextField(
+                        NetworkMode.defaultVmnetNetworkID,
+                        text: vmnetNetworkIDBinding(for: index)
+                    )
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                HStack(spacing: 12) {
+                    fieldLabel("IPv4 Subnet")
+                    TextField(
+                        "Automatic",
+                        text: vmnetIPv4SubnetBinding(for: index)
+                    )
+                        .textFieldStyle(.roundedBorder)
+                        .help("Use CIDR notation such as 192.168.65.0/24. Leave blank for macOS automatic selection.")
+                }
             }
         case .nat, .hostOnly:
             EmptyView()
@@ -681,14 +709,49 @@ struct VMSettingsView: View {
         Binding(
             get: {
                 guard editedConfig.network.interfaces.indices.contains(index),
-                      case .vmnetShared(let networkID) = editedConfig.network.interfaces[index].mode else {
+                      case .vmnetShared(let vmnet) = editedConfig.network.interfaces[index].mode else {
                     return NetworkMode.defaultVmnetNetworkID
                 }
-                return networkID
+                return vmnet.networkID
             },
             set: { value in
                 guard editedConfig.network.interfaces.indices.contains(index) else { return }
-                editedConfig.network.interfaces[index].mode = .vmnetShared(networkID: value)
+                var vmnet = existingVmnetConfig(
+                    from: editedConfig.network.interfaces[index].mode
+                )
+                vmnet.networkID = value
+                editedConfig.network.interfaces[index].mode = .vmnetShared(vmnet)
+            }
+        )
+    }
+
+    private func vmnetIPv4SubnetBinding(for index: Int) -> Binding<String> {
+        Binding(
+            get: {
+                guard editedConfig.network.interfaces.indices.contains(index) else { return "" }
+                let iface = editedConfig.network.interfaces[index]
+                if let draft = vmnetIPv4SubnetDrafts[iface.id] {
+                    return draft
+                }
+                guard case .vmnetShared(let vmnet) = iface.mode else { return "" }
+                return vmnet.ipv4Subnet?.cidrNotation ?? ""
+            },
+            set: { value in
+                guard editedConfig.network.interfaces.indices.contains(index) else { return }
+                let iface = editedConfig.network.interfaces[index]
+                vmnetIPv4SubnetDrafts[iface.id] = value
+                hasChanges = true
+
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                var vmnet = existingVmnetConfig(from: iface.mode)
+                if trimmed.isEmpty {
+                    vmnet.ipv4Subnet = nil
+                    editedConfig.network.interfaces[index].mode = .vmnetShared(vmnet)
+                } else if let subnet = try? IPv4Subnet(cidr: trimmed) {
+                    vmnet.ipv4Subnet = subnet
+                    vmnetIPv4SubnetDrafts[iface.id] = subnet.cidrNotation
+                    editedConfig.network.interfaces[index].mode = .vmnetShared(vmnet)
+                }
             }
         )
     }
@@ -702,7 +765,7 @@ struct VMSettingsView: View {
             editedConfig.network.interfaces[index].mode = .nat
         case .vmnetShared:
             editedConfig.network.interfaces[index].mode = .vmnetShared(
-                networkID: existingVmnetNetworkID(from: currentMode)
+                existingVmnetConfig(from: currentMode)
             )
         case .hostOnly:
             editedConfig.network.interfaces[index].mode = .hostOnly
@@ -713,12 +776,14 @@ struct VMSettingsView: View {
         }
     }
 
-    private func existingVmnetNetworkID(from mode: NetworkMode) -> String {
-        if case .vmnetShared(let networkID) = mode {
-            let trimmed = networkID.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? NetworkMode.defaultVmnetNetworkID : networkID
+    private func existingVmnetConfig(from mode: NetworkMode) -> VmnetSharedNetworkConfig {
+        if case .vmnetShared(let vmnet) = mode {
+            let trimmed = vmnet.networkID.trimmingCharacters(in: .whitespacesAndNewlines)
+            var config = vmnet
+            config.networkID = trimmed.isEmpty ? NetworkMode.defaultVmnetNetworkID : vmnet.networkID
+            return config
         }
-        return NetworkMode.defaultVmnetNetworkID
+        return VmnetSharedNetworkConfig()
     }
 
     private func existingBridgeInterface(from mode: NetworkMode) -> String {
@@ -905,7 +970,14 @@ struct VMSettingsView: View {
     private func saveChanges() {
         saveError = nil
 
-        let updated = editedConfig.touchingModifiedDate()
+        let updated: VMConfiguration
+        do {
+            updated = try configApplyingNetworkDrafts().touchingModifiedDate()
+        } catch {
+            saveError = error.localizedDescription
+            return
+        }
+
         let repo = VMRepository()
 
         do {
@@ -915,6 +987,46 @@ struct VMSettingsView: View {
         } catch {
             VortexLog.gui.error("Failed to save VM settings: \(error.localizedDescription)")
             saveError = "Failed to save: \(error.localizedDescription)"
+        }
+    }
+
+    private func configApplyingNetworkDrafts() throws -> VMConfiguration {
+        var updated = editedConfig
+
+        for index in updated.network.interfaces.indices {
+            let iface = updated.network.interfaces[index]
+            guard case .vmnetShared(var vmnet) = iface.mode,
+                  let draft = vmnetIPv4SubnetDrafts[iface.id] else {
+                continue
+            }
+
+            let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                vmnet.ipv4Subnet = nil
+            } else {
+                do {
+                    vmnet.ipv4Subnet = try IPv4Subnet(cidr: trimmed)
+                } catch {
+                    throw VMSettingsError.invalidVmnetIPv4Subnet(
+                        iface.label ?? "Interface \(index + 1)",
+                        error.localizedDescription
+                    )
+                }
+            }
+            updated.network.interfaces[index].mode = .vmnetShared(vmnet)
+        }
+
+        return updated
+    }
+}
+
+private enum VMSettingsError: LocalizedError {
+    case invalidVmnetIPv4Subnet(String, String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidVmnetIPv4Subnet(let interface, let reason):
+            return "\(interface) has an invalid vmnet IPv4 subnet: \(reason)"
         }
     }
 }

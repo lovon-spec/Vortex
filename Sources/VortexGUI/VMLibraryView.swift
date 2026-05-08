@@ -318,6 +318,10 @@ private struct VMDetailContent: View {
         viewModel.usesExternalResources(for: config)
     }
 
+    private var vmnetNetworkStatuses: [VmnetNetworkStatus] {
+        controller?.vmnetNetworkStatuses ?? []
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
@@ -356,6 +360,15 @@ private struct VMDetailContent: View {
 
                 Divider()
                     .padding(.horizontal, 24)
+
+                if !vmnetNetworkStatuses.isEmpty {
+                    vmnetNetworkSection
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 20)
+
+                    Divider()
+                        .padding(.horizontal, 24)
+                }
 
                 // Audio section
                 audioSection
@@ -577,6 +590,32 @@ private struct VMDetailContent: View {
         if count == 0 { return "None" }
         let mode = config.network.interfaces.first?.mode.displayName ?? ""
         return "\(count) interface\(count == 1 ? "" : "s") (\(mode))"
+    }
+
+    // MARK: - Network Section
+
+    private var vmnetNetworkSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("vmnet")
+                .font(.subheadline)
+                .fontWeight(.semibold)
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+
+            ForEach(vmnetNetworkStatuses) { status in
+                HStack(spacing: 16) {
+                    InfoItem(label: "Network", value: status.networkID)
+                    InfoItem(
+                        label: "Subnet",
+                        value: status.activeIPv4Subnet?.cidrNotation ?? "Pending"
+                    )
+                    InfoItem(
+                        label: "Host",
+                        value: status.hostIPv4Address ?? "Unknown"
+                    )
+                }
+            }
+        }
     }
 
     // MARK: - Audio Section
