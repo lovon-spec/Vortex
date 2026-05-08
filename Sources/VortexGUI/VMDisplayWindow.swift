@@ -43,7 +43,7 @@ struct VMDisplayWindow: View {
         }
         .task(id: isPrimaryDisplayWindow) {
             guard isPrimaryDisplayWindow == true else { return }
-            await prepareAndBoot()
+            await attachController()
         }
         .onDisappear {
             if let registeredWindow {
@@ -67,25 +67,17 @@ struct VMDisplayWindow: View {
         }
     }
 
-    private func prepareAndBoot() async {
-        // Check if already running.
-        if let existing = viewModel.controller(for: vmID) {
-            self.controller = existing
-            registeredWindow?.title = existing.config.identity.name
-            return
+    private func attachController() async {
+        for _ in 0..<200 {
+            if let existing = viewModel.controller(for: vmID) {
+                self.controller = existing
+                registeredWindow?.title = existing.config.identity.name
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(50))
         }
 
-        // Prepare and boot.
-        do {
-            let ctrl = try viewModel.prepareVM(id: vmID)
-            self.controller = ctrl
-            registeredWindow?.title = ctrl.config.identity.name
-            // Small delay for the window to fully appear before starting.
-            try await Task.sleep(for: .milliseconds(300))
-            await ctrl.start()
-        } catch {
-            bootError = error.localizedDescription
-        }
+        bootError = viewModel.errorMessage ?? "No VM controller is available for this display."
     }
 }
 

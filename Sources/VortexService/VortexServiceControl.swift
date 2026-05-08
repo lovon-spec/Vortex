@@ -9,6 +9,7 @@ public struct VortexServiceCommand: Codable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case activate
         case openVM
+        case stopVM
     }
 
     public var kind: Kind

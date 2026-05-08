@@ -107,6 +107,12 @@ struct VMLibraryView: View {
             Task {
                 await viewModel.bootVM(id: vmID, startOptions: command.startOptions)
             }
+        case .stopVM:
+            guard let vmID = command.vmID else { return }
+            viewModel.selectedVMID = vmID
+            Task {
+                await viewModel.stopVM(id: vmID)
+            }
         }
     }
 }

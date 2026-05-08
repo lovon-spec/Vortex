@@ -37,6 +37,7 @@ public final class VMController: Identifiable {
     public var canStop: Bool = false
     public var errorMessage: String?
     public var showAudioSettings: Bool = false
+    public var isStarting: Bool = false
 
     /// Whether the guest audio daemon has connected to the bridge.
     ///
@@ -115,9 +116,19 @@ public final class VMController: Identifiable {
     // MARK: - Lifecycle
 
     public func start() async {
-        guard vm.canStart else { return }
+        guard !isStarting else {
+            VortexLog.service.debug("Ignoring duplicate start request for VM \(self.config.id)")
+            return
+        }
+        guard vm.canStart else {
+            updateFromVZState()
+            VortexLog.service.debug("Ignoring start request for VM \(self.config.id) in state \(self.stateLabel)")
+            return
+        }
+        isStarting = true
         stateLabel = "Starting"
         canStart = false
+        errorMessage = nil
         do {
             try await manager.start(vm)
             updateFromVZState()
@@ -127,8 +138,9 @@ public final class VMController: Identifiable {
         } catch {
             errorMessage = error.localizedDescription
             stateLabel = "Error"
-            canStart = true
+            canStart = vm.canStart
         }
+        isStarting = false
     }
 
     public func stop() async {
@@ -340,6 +352,7 @@ public final class VMController: Identifiable {
         stateLabel = state.rawValue.capitalized
         isRunning = (state == .running)
         isPaused = (state == .paused)
+        isStarting = (state == .starting)
         canStart = state.canStart
         canStop = state.canStop
     }
@@ -349,6 +362,7 @@ public final class VMController: Identifiable {
         stateLabel = vzStateName(vzState).capitalized
         isRunning = (vzState == .running)
         isPaused = (vzState == .paused)
+        isStarting = (vzState == .starting)
         canStart = vm.canStart
         canStop = vm.canRequestStop || vm.canStop
     }

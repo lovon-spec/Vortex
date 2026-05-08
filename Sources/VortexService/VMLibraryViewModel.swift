@@ -57,6 +57,10 @@ public final class VMLibraryViewModel {
     /// Maps VM ID to its running controller. Only populated while a VM is running.
     public var runningControllers: [UUID: VMController] = [:]
 
+    /// VM IDs with an active boot request. Used to collapse duplicate GUI,
+    /// service, and toolbar starts into the same lifecycle operation.
+    private var bootingVMIDs: Set<UUID> = []
+
     /// Error message to display in the library view.
     public var errorMessage: String?
 
@@ -168,11 +172,24 @@ public final class VMLibraryViewModel {
 
     /// Boots a VM: creates it, registers the controller, and starts execution.
     public func bootVM(id: UUID, startOptions: VortexVMStartOptions? = nil) async {
+        guard !bootingVMIDs.contains(id) else {
+            VortexLog.service.debug("Ignoring duplicate boot request for VM \(id)")
+            return
+        }
+        bootingVMIDs.insert(id)
+        defer {
+            bootingVMIDs.remove(id)
+        }
+
         do {
             let controller = try prepareVM(id: id, startOptions: startOptions)
             try await Task.sleep(for: .milliseconds(200))
             await controller.start()
-            if controller.errorMessage != nil && !controller.isRunning && !controller.isPaused {
+            if controller.errorMessage != nil
+                && controller.canStart
+                && !controller.isRunning
+                && !controller.isPaused
+                && !controller.isStarting {
                 controller.releaseOwnerLock()
                 runningControllers.removeValue(forKey: id)
             }
