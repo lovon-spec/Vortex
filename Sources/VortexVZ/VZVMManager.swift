@@ -295,6 +295,13 @@ public final class VZVMManager: NSObject {
 
     /// Starts a stopped VM.
     ///
+    /// On failure, best-effort tears down VZ's underlying VM process so the
+    /// disk-image file lock and XPC service are released. Without this, VZ can
+    /// fire `.failure` on `start` while leaving the spawned
+    /// `com.apple.Virtualization.VirtualMachine.xpc` running and holding
+    /// `O_EXLOCK` on the boot disk — the next `start` attempt then fails with
+    /// "Failed to lock auxiliary storage" until the host process exits.
+    ///
     /// - Parameter vm: The virtual machine to start. Must be in the stopped state.
     /// - Throws: `VortexError.vmStartFailed` if the VM fails to start.
     public func start(_ vm: VZVirtualMachine) async throws {
@@ -304,19 +311,26 @@ public final class VZVMManager: NSObject {
             )
         }
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            vm.start { result in
-                switch result {
-                case .success:
-                    continuation.resume()
-                case .failure(let error):
-                    continuation.resume(
-                        throwing: VortexError.vmStartFailed(
-                            reason: error.localizedDescription
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                vm.start { result in
+                    switch result {
+                    case .success:
+                        continuation.resume()
+                    case .failure(let error):
+                        continuation.resume(
+                            throwing: VortexError.vmStartFailed(
+                                reason: error.localizedDescription
+                            )
                         )
-                    )
+                    }
                 }
             }
+        } catch {
+            if vm.canStop {
+                try? await vm.stop()
+            }
+            throw error
         }
     }
 
