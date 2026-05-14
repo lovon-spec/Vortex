@@ -115,6 +115,29 @@ public final class FWCfgDevice: MMIODevice, @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Add QEMU's `bootorder` fw_cfg file.
+    ///
+    /// QEMU-aware EDK2 firmware reads this file to connect and prioritize boot
+    /// devices. The payload is a NUL-terminated list of OpenFirmware device
+    /// paths, one path per line.
+    @discardableResult
+    public func addQEMUBootOrder(paths: [String]) -> UInt16 {
+        var data = Data(paths.joined(separator: "\n").utf8)
+        if !paths.isEmpty {
+            data.append(0x0A)
+        }
+        data.append(0x00)
+        return addFile(name: "bootorder", data: data)
+    }
+
+    /// Return the OpenFirmware path used by QEMU for a PCI virtio-blk disk.
+    public static func qemuPCIVirtioBlockBootPath(slot: Int, function: Int = 0) -> String {
+        if function == 0 {
+            return "/pci@i0cf8/scsi@\(String(slot, radix: 16))/disk@0,0"
+        }
+        return "/pci@i0cf8/scsi@\(String(slot, radix: 16)),\(String(function, radix: 16))/disk@0,0"
+    }
+
     /// Add a string for a well-known selector key.
     public func addEntry(key: UInt16, string: String) {
         var data = Data(string.utf8)

@@ -237,6 +237,7 @@ public final class NativeLinuxVM: @unchecked Sendable {
         let blockBaseSlot = 3
         let audioBaseSlot = 6
         let inputBaseSlot = 8
+        var blockBootPaths: [String] = []
 
         for (index, disk) in configuration.storage.disks.enumerated() {
             let backend = try makeBlockBackend(for: disk)
@@ -252,8 +253,13 @@ public final class NativeLinuxVM: @unchecked Sendable {
             )
             transport.attachGuestMemory(memory)
 
-            try addPCITransport(transport, preferredSlot: blockBaseSlot + index)
+            let slot = try addPCITransport(transport, preferredSlot: blockBaseSlot + index)
+            blockBootPaths.append(FWCfgDevice.qemuPCIVirtioBlockBootPath(slot: slot))
             pciTransports.append(transport)
+        }
+
+        if !blockBootPaths.isEmpty {
+            vm.fwCfg.addQEMUBootOrder(paths: blockBootPaths)
         }
 
         for (index, interface) in configuration.network.interfaces.enumerated() {
