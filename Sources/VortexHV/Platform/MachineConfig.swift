@@ -69,6 +69,7 @@ public struct VMConfig: Sendable {
 /// 0x0C00_0000                                    -- GIC MSI frame
 /// 0x1000_0000                                    -- PCI ECAM
 /// 0x2000_0000                                    -- PCI MMIO (32-bit window)
+/// 0x3F00_0000 .. 0x3FFF_FFFF                     -- firmware scratch RAM
 /// 0x80_0000_0000                                 -- PCI MMIO (64-bit window)
 /// ```
 public enum MachineMemoryMap {
@@ -83,6 +84,11 @@ public enum MachineMemoryMap {
     // -- RAM ----------------------------------------------------------------
     /// Default guest RAM base address (1 GiB mark, leaving low memory for devices).
     public static let ramBase: UInt64 = 0x4000_0000
+    /// Early firmware scratch RAM below DRAM. QEMU AArch64 EDK2 uses this area
+    /// for temporary page tables before handing control to the OS.
+    public static let firmwareScratchBase: UInt64 = 0x3F00_0000
+    /// Size of the early firmware scratch RAM window.
+    public static let firmwareScratchSize: UInt64 = 0x0100_0000
 
     // -- GIC ----------------------------------------------------------------
     /// GIC v3 Distributor base address.
@@ -130,7 +136,7 @@ public enum MachineMemoryMap {
     /// PCI MMIO 32-bit window base.
     public static let pciMmio32Base: UInt64 = 0x2000_0000
     /// PCI MMIO 32-bit window size.
-    public static let pciMmio32Size: UInt64 = 0x2000_0000
+    public static let pciMmio32Size: UInt64 = firmwareScratchBase - pciMmio32Base
     /// PCI MMIO 64-bit window base.
     public static let pciMmio64Base: UInt64 = 0x80_0000_0000
     /// PCI MMIO 64-bit window size.

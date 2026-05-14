@@ -85,6 +85,10 @@ public final class VirtualMachine: @unchecked Sendable {
         try gic.initialize()
 
         // Map guest RAM.
+        try memoryManager.mapRAM(
+            at: MachineMemoryMap.firmwareScratchBase,
+            size: MachineMemoryMap.firmwareScratchSize
+        )
         let ramPtr = try memoryManager.mapRAM(
             at: MachineMemoryMap.ramBase,
             size: config.ramSize
