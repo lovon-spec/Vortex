@@ -235,6 +235,13 @@ public final class VirtualMachine: @unchecked Sendable {
         }
     }
 
+    /// Return lightweight vCPU diagnostics. When `forceExit` is true, each
+    /// running vCPU is briefly nudged out of `hv_vcpu_run` so the snapshot has
+    /// a recent PC and exit reason.
+    public func vcpuDiagnostics(forceExit: Bool = false) -> [VCPUThread.Diagnostics] {
+        vcpuThreads.map { $0.diagnostics(forceExit: forceExit) }
+    }
+
     // MARK: - Destruction
 
     deinit {

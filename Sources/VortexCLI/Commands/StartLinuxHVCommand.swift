@@ -87,6 +87,9 @@ struct StartLinuxHVCommand: ParsableCommand {
     @Option(help: "Optional path to write the latest native framebuffer as a binary PPM image.")
     var framebufferDump: String?
 
+    @Option(help: "Optional interval in seconds for printing vCPU diagnostics.")
+    var diagnosticsInterval: Double?
+
     func run() throws {
         let diskSize: UInt64
         if disk.hasPrefix("ssh://") {
@@ -177,10 +180,28 @@ struct StartLinuxHVCommand: ParsableCommand {
         }
         source.resume()
 
+        var diagnosticsTimer: DispatchSourceTimer?
+        if let diagnosticsInterval, diagnosticsInterval > 0 {
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(
+                deadline: .now() + diagnosticsInterval,
+                repeating: diagnosticsInterval
+            )
+            timer.setEventHandler {
+                for snapshot in vm.vm.vcpuDiagnostics(forceExit: true) {
+                    let reason = snapshot.lastExitReason.map(String.init) ?? "none"
+                    print("[diag] vCPU \(snapshot.index) running=\(snapshot.isRunning) pc=0x\(String(snapshot.lastPC, radix: 16)) exit=\(reason) exits=\(snapshot.exitCount)")
+                }
+            }
+            timer.resume()
+            diagnosticsTimer = timer
+        }
+
         try vm.start()
         while !shouldStop {
             RunLoop.main.run(mode: .default, before: .distantFuture)
         }
+        diagnosticsTimer?.cancel()
 
         if let lifecycleError {
             throw RuntimeError(lifecycleError)

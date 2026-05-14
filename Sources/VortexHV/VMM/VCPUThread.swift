@@ -39,6 +39,10 @@ public final class VCPUThread: @unchecked Sendable {
     private let resumeSemaphore = DispatchSemaphore(value: 0)
     private let startedSemaphore = DispatchSemaphore(value: 0)
     private var startError: hv_return_t = 0 // HV_SUCCESS
+    private let diagnosticsLock = NSLock()
+    private var lastPC: UInt64 = 0
+    private var lastExitReason: UInt32?
+    private var exitCount: UInt64 = 0
 
     public init(index: Int, exitHandler: VCPUExitHandler) {
         self.index = index
@@ -113,6 +117,36 @@ public final class VCPUThread: @unchecked Sendable {
     /// Whether this thread currently owns a live vCPU.
     public var isRunning: Bool { runningFlag.load() }
 
+    public struct Diagnostics: Sendable {
+        public let index: Int
+        public let isRunning: Bool
+        public let lastPC: UInt64
+        public let lastExitReason: UInt32?
+        public let exitCount: UInt64
+    }
+
+    public func diagnostics(forceExit: Bool = false) -> Diagnostics {
+        if forceExit {
+            let handle = vcpuHandle
+            if handle != 0 {
+                var vcpus = [handle]
+                _ = hv_vcpus_exit(&vcpus, 1)
+                Thread.sleep(forTimeInterval: 0.005)
+            }
+        }
+
+        diagnosticsLock.lock()
+        let snapshot = Diagnostics(
+            index: index,
+            isRunning: isRunning,
+            lastPC: lastPC,
+            lastExitReason: lastExitReason,
+            exitCount: exitCount
+        )
+        diagnosticsLock.unlock()
+        return snapshot
+    }
+
     // MARK: - Run Loop
 
     private func runLoop() {
@@ -158,6 +192,7 @@ public final class VCPUThread: @unchecked Sendable {
             }
 
             let exit = exitPtr.pointee
+            record(exit: exit, vcpu: vcpu)
 
             switch exit.reason {
             case HV_EXIT_REASON_EXCEPTION:
@@ -186,6 +221,16 @@ public final class VCPUThread: @unchecked Sendable {
         _ = hv_vcpu_destroy(vcpu)
         vcpuHandle = 0
         runningFlag.clear()
+    }
+
+    private func record(exit: hv_vcpu_exit_t, vcpu: hv_vcpu_t) {
+        var pc: UInt64 = 0
+        _ = hv_vcpu_get_reg(vcpu, HV_REG_PC, &pc)
+        diagnosticsLock.lock()
+        lastPC = pc
+        lastExitReason = exit.reason.rawValue
+        exitCount &+= 1
+        diagnosticsLock.unlock()
     }
 
     // MARK: - Register Access (must be called from vcpu thread or when paused)
