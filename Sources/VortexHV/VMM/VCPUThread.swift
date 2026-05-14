@@ -32,6 +32,7 @@ public final class VCPUThread: @unchecked Sendable {
     // Internal state
     private var thread: Thread?
     private var vcpuHandle: hv_vcpu_t = 0
+    private var hasVCPUHandle = false
     private let cancelledFlag = AtomicFlag()
     private let pausedFlag = AtomicFlag()
     private let runningFlag = AtomicFlag()
@@ -88,8 +89,7 @@ public final class VCPUThread: @unchecked Sendable {
             resumeSemaphore.signal()
         }
         // Force exit the vCPU if it is running.
-        let handle = currentHandle()
-        if handle != 0 {
+        if let handle = currentValidHandle() {
             var vcpus = [handle]
             _ = hv_vcpus_exit(&vcpus, 1)
         }
@@ -98,8 +98,7 @@ public final class VCPUThread: @unchecked Sendable {
     /// Pause the vCPU. The run loop will block at the next iteration.
     public func pause() {
         pausedFlag.set()
-        let handle = currentHandle()
-        if handle != 0 {
+        if let handle = currentValidHandle() {
             var vcpus = [handle]
             _ = hv_vcpus_exit(&vcpus, 1)
         }
@@ -132,13 +131,15 @@ public final class VCPUThread: @unchecked Sendable {
     public func diagnostics(forceExit: Bool = false) -> Diagnostics {
         let initialCount: UInt64
         let handle: hv_vcpu_t
+        let hasHandle: Bool
         diagnosticsLock.lock()
         handle = vcpuHandle
+        hasHandle = hasVCPUHandle
         initialCount = exitCount
         diagnosticsLock.unlock()
 
         if forceExit {
-            if handle != 0 {
+            if hasHandle {
                 var vcpus = [handle]
                 let exitRet = hv_vcpus_exit(&vcpus, 1)
                 recordForceExitReturn(exitRet)
@@ -174,7 +175,7 @@ public final class VCPUThread: @unchecked Sendable {
         guard let exitPtr = exitInfo else {
             VortexLog.hv.error("VCPU \(self.index): exit info pointer is nil after creation")
             _ = hv_vcpu_destroy(vcpu)
-            setCurrentHandle(0)
+            clearCurrentHandle()
             return
         }
 
@@ -223,7 +224,7 @@ public final class VCPUThread: @unchecked Sendable {
         // Notify and destroy.
         onVCPUStopped?(vcpu)
         _ = hv_vcpu_destroy(vcpu)
-        setCurrentHandle(0)
+        clearCurrentHandle()
         runningFlag.clear()
     }
 
@@ -254,9 +255,24 @@ public final class VCPUThread: @unchecked Sendable {
         return handle
     }
 
+    private func currentValidHandle() -> hv_vcpu_t? {
+        diagnosticsLock.lock()
+        let handle = hasVCPUHandle ? vcpuHandle : nil
+        diagnosticsLock.unlock()
+        return handle
+    }
+
     private func setCurrentHandle(_ handle: hv_vcpu_t) {
         diagnosticsLock.lock()
         vcpuHandle = handle
+        hasVCPUHandle = true
+        diagnosticsLock.unlock()
+    }
+
+    private func clearCurrentHandle() {
+        diagnosticsLock.lock()
+        vcpuHandle = 0
+        hasVCPUHandle = false
         diagnosticsLock.unlock()
     }
 
@@ -296,7 +312,7 @@ public final class VCPUThread: @unchecked Sendable {
         let deadline = Date().addingTimeInterval(0.2)
         while Date() < deadline {
             diagnosticsLock.lock()
-            let didExit = exitCount != initialCount || vcpuHandle == 0
+            let didExit = exitCount != initialCount || !hasVCPUHandle
             diagnosticsLock.unlock()
             if didExit {
                 return
