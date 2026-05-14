@@ -190,7 +190,9 @@ struct StartLinuxHVCommand: ParsableCommand {
             timer.setEventHandler {
                 for snapshot in vm.vm.vcpuDiagnostics(forceExit: true) {
                     let reason = snapshot.lastExitReason.map(String.init) ?? "none"
-                    print("[diag] vCPU \(snapshot.index) running=\(snapshot.isRunning) pc=0x\(String(snapshot.lastPC, radix: 16)) exit=\(reason) exits=\(snapshot.exitCount)")
+                    let forceExit = snapshot.lastForceExitReturn.map(String.init) ?? "none"
+                    let liveRead = snapshot.lastLiveRegisterReadReturn.map(String.init) ?? "none"
+                    print("[diag] vCPU \(snapshot.index) running=\(snapshot.isRunning) pc=0x\(String(snapshot.lastPC, radix: 16)) exit=\(reason) exits=\(snapshot.exitCount) forceExit=\(forceExit) liveRead=\(liveRead)")
                 }
             }
             timer.resume()

@@ -43,6 +43,8 @@ public final class VCPUThread: @unchecked Sendable {
     private var lastPC: UInt64 = 0
     private var lastExitReason: UInt32?
     private var exitCount: UInt64 = 0
+    private var lastForceExitReturn: hv_return_t?
+    private var lastLiveRegisterReadReturn: hv_return_t?
 
     public init(index: Int, exitHandler: VCPUExitHandler) {
         self.index = index
@@ -123,6 +125,8 @@ public final class VCPUThread: @unchecked Sendable {
         public let lastPC: UInt64
         public let lastExitReason: UInt32?
         public let exitCount: UInt64
+        public let lastForceExitReturn: hv_return_t?
+        public let lastLiveRegisterReadReturn: hv_return_t?
     }
 
     public func diagnostics(forceExit: Bool = false) -> Diagnostics {
@@ -136,8 +140,10 @@ public final class VCPUThread: @unchecked Sendable {
         if forceExit {
             if handle != 0 {
                 var vcpus = [handle]
-                _ = hv_vcpus_exit(&vcpus, 1)
+                let exitRet = hv_vcpus_exit(&vcpus, 1)
+                recordForceExitReturn(exitRet)
                 waitForDiagnosticExit(after: initialCount)
+                refreshLiveState(handle: handle)
             }
         }
 
@@ -261,10 +267,29 @@ public final class VCPUThread: @unchecked Sendable {
             isRunning: isRunning,
             lastPC: lastPC,
             lastExitReason: lastExitReason,
-            exitCount: exitCount
+            exitCount: exitCount,
+            lastForceExitReturn: lastForceExitReturn,
+            lastLiveRegisterReadReturn: lastLiveRegisterReadReturn
         )
         diagnosticsLock.unlock()
         return snapshot
+    }
+
+    private func recordForceExitReturn(_ ret: hv_return_t) {
+        diagnosticsLock.lock()
+        lastForceExitReturn = ret
+        diagnosticsLock.unlock()
+    }
+
+    private func refreshLiveState(handle: hv_vcpu_t) {
+        var pc: UInt64 = 0
+        let ret = hv_vcpu_get_reg(handle, HV_REG_PC, &pc)
+        diagnosticsLock.lock()
+        lastLiveRegisterReadReturn = ret
+        if ret == HV_SUCCESS {
+            lastPC = pc
+        }
+        diagnosticsLock.unlock()
     }
 
     private func waitForDiagnosticExit(after initialCount: UInt64) {
