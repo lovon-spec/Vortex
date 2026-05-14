@@ -227,6 +227,8 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
 
     /// Whether the VARS bank has been modified since last flush.
     private var varsDirty = false
+    private let traceFlash = ProcessInfo.processInfo.environment["VORTEX_HV_TRACE_FLASH"] == "1"
+    private var traceCount = 0
 
     // MARK: - Initialization
 
@@ -368,7 +370,9 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
         defer { lock.unlock() }
 
         let (bank, bankOffset) = bankForOffset(offset)
-        return readFromBank(bank, offset: bankOffset, size: size)
+        let value = readFromBank(bank, offset: bankOffset, size: size)
+        traceAccess(kind: "read", bank: bank, offset: bankOffset, size: size, value: value)
+        return value
     }
 
     public func mmioWrite(offset: UInt64, size: Int, value: UInt64) {
@@ -376,6 +380,7 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
         defer { lock.unlock() }
 
         let (bank, bankOffset) = bankForOffset(offset)
+        traceAccess(kind: "write", bank: bank, offset: bankOffset, size: size, value: value)
         writeToBank(bank, offset: bankOffset, size: size, value: value)
     }
 
@@ -522,6 +527,22 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
             // Unknown command -- go to read-status mode with ready flag.
             bank.state = .readStatus
         }
+    }
+
+    private func traceAccess(kind: String, bank: FlashBank, offset: Int, size: Int, value: UInt64) {
+        guard traceFlash, traceCount < 500 else { return }
+        traceCount += 1
+        let bankName = bank === codeBank ? "code" : "vars"
+        let line = String(
+            format: "[flash] %@ bank=%@ off=0x%x size=%d value=0x%llx state=%@\n",
+            kind,
+            bankName,
+            offset,
+            size,
+            value,
+            String(describing: bank.state)
+        )
+        FileHandle.standardError.write(Data(line.utf8))
     }
 
     /// Execute a word program operation on the bank.
