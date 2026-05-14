@@ -12,6 +12,7 @@
 import Darwin
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 import VortexCore
 import VortexPersistence
 
@@ -60,6 +61,10 @@ struct VMImportView: View {
     @State private var auxiliaryStoragePath: URL?
     @State private var hardwareModelSource: CompanionSource?
     @State private var machineIdentifierSource: CompanionSource?
+    @State private var utmConfigPlistURL: URL?
+    @State private var qemuUTMConfig: UTMConfigPlist?
+    @State private var qemuEFIStorePath: URL?
+    @State private var qemuUEFIFirmwarePath: URL?
 
     /// User-configurable VM parameters.
     @State private var vmName: String = "Imported VM"
@@ -111,6 +116,11 @@ struct VMImportView: View {
             && !isImporting
             && !vmName.trimmingCharacters(in: .whitespaces).isEmpty
             && (!hasAnyMacPlatformArtifact || hasCompleteMacPlatformArtifacts)
+            && (!isQEMUUTMConfig || (qemuEFIStorePath != nil && qemuUEFIFirmwarePath != nil))
+    }
+
+    private var isQEMUUTMConfig: Bool {
+        qemuUTMConfig?.isQEMUAArch64Linux == true
     }
 
     private var shouldReferenceOriginalFiles: Bool {
@@ -144,7 +154,11 @@ struct VMImportView: View {
 
                     // Companion files status
                     if diskImageURL != nil {
-                        companionFilesSection
+                        if isQEMUUTMConfig {
+                            qemuFilesSection
+                        } else {
+                            companionFilesSection
+                        }
                     }
 
                     if hasAnyMacPlatformArtifact && !hasCompleteMacPlatformArtifacts {
@@ -316,6 +330,67 @@ struct VMImportView: View {
         }
     }
 
+    private var qemuFilesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Detected QEMU VM")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+
+            VStack(spacing: 6) {
+                qemuRow(
+                    label: "config.plist",
+                    value: utmConfigPlistURL?.deletingLastPathComponent().lastPathComponent,
+                    icon: "doc.text"
+                )
+                qemuRow(
+                    label: "EFI variables",
+                    value: qemuEFIStorePath?.lastPathComponent,
+                    icon: "memorychip"
+                )
+                qemuRow(
+                    label: "AArch64 EDK2",
+                    value: qemuUEFIFirmwarePath?.lastPathComponent,
+                    icon: "cpu"
+                )
+            }
+            .padding(12)
+            .background(.black.opacity(0.2))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private func qemuRow(label: String, value: String?, icon: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+
+            Text(label)
+                .font(.subheadline)
+
+            Spacer()
+
+            if let value {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+                Text(value)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            } else {
+                Image(systemName: "exclamationmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.yellow)
+                Text("Not found")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
     private var incompleteMacImportWarning: some View {
         HStack(spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill")
@@ -456,13 +531,21 @@ struct VMImportView: View {
     private func openDiskImagePanel() {
         let panel = NSOpenPanel()
         panel.title = "Select Disk Image"
-        panel.message = "Choose a .img disk image file to import."
-        panel.allowedContentTypes = [.data]
+        panel.message = "Choose a disk image file or UTM bundle to import."
+        panel.allowedContentTypes = [.data, .package]
         panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
+        panel.canChooseDirectories = true
         panel.canChooseFiles = true
 
-        guard panel.runModal() == .OK, let url = panel.url else {
+        guard panel.runModal() == .OK, let selectedURL = panel.url else {
+            return
+        }
+
+        let url: URL
+        do {
+            url = try resolveDiskImageSelection(selectedURL)
+        } catch {
+            importError = error.localizedDescription
             return
         }
 
@@ -483,6 +566,36 @@ struct VMImportView: View {
         detectCompanionFiles(near: url)
     }
 
+    private func resolveDiskImageSelection(_ url: URL) throws -> URL {
+        guard url.pathExtension.lowercased() == "utm" else {
+            return url
+        }
+
+        let configURL = url.appendingPathComponent("config.plist")
+        let config = try UTMConfigPlist.load(from: configURL)
+        guard config.isQEMUAArch64Linux,
+              let drive = config.drives?.first(where: { $0.readOnly != true }),
+              let imageName = drive.imageName,
+              !imageName.isEmpty else {
+            throw CocoaError(.fileReadUnknown, userInfo: [
+                NSLocalizedDescriptionKey: "Could not find a writable QEMU disk in \(url.lastPathComponent)."
+            ])
+        }
+
+        let diskURL = resolveUTMDataPath(
+            imageName,
+            bundleDir: url,
+            dataDir: url.appendingPathComponent("Data")
+        )
+
+        guard FileManager.default.fileExists(atPath: diskURL.path) else {
+            throw CocoaError(.fileNoSuchFile, userInfo: [
+                NSLocalizedDescriptionKey: "The QEMU disk \(imageName) was not found in \(url.lastPathComponent)."
+            ])
+        }
+        return diskURL
+    }
+
     // MARK: - Companion File Detection
 
     /// Searches for macOS VM companion files near the selected disk image.
@@ -498,6 +611,10 @@ struct VMImportView: View {
         auxiliaryStoragePath = nil
         hardwareModelSource = nil
         machineIdentifierSource = nil
+        utmConfigPlistURL = nil
+        qemuUTMConfig = nil
+        qemuEFIStorePath = nil
+        qemuUEFIFirmwarePath = nil
 
         let fm = FileManager.default
 
@@ -536,12 +653,12 @@ struct VMImportView: View {
         }
 
         // Try extracting from UTM config.plist if present.
-        extractFromUTMConfig(searchDirs: searchDirs)
+        extractFromUTMConfig(searchDirs: searchDirs, diskURL: diskURL)
     }
 
     /// Looks for a UTM config.plist in the given directories and attempts to
     /// resolve companion file paths from its contents.
-    private func extractFromUTMConfig(searchDirs: [URL]) {
+    private func extractFromUTMConfig(searchDirs: [URL], diskURL: URL) {
         let fm = FileManager.default
 
         for dir in searchDirs {
@@ -553,6 +670,38 @@ struct VMImportView: View {
 
             // UTM stores data paths relative to the .utm bundle's Data directory.
             let dataDir = dir.appendingPathComponent("Data")
+
+            if plist.isQEMUAArch64Linux {
+                utmConfigPlistURL = configPlist
+                qemuUTMConfig = plist
+
+                if let name = plist.information?.name, !name.isEmpty {
+                    vmName = name
+                }
+                if let cpuCount = plist.system?.cpuCount {
+                    cpuCores = min(max(1, cpuCount), maxCPUCores)
+                }
+                if let memoryMiB = plist.system?.memorySize {
+                    let memoryGiBValue = max(1, (memoryMiB + 1023) / 1024)
+                    memoryGiB = min(max(memoryGiBValue, minMemoryGiB), maxMemoryGiB)
+                }
+
+                let efiRelativePath = plist.efiVariableStorageRelativePath ?? "efi_vars.fd"
+                let efiCandidate = resolveUTMDataPath(
+                    efiRelativePath,
+                    bundleDir: dir,
+                    dataDir: dataDir
+                )
+                if fm.fileExists(atPath: efiCandidate.path) {
+                    qemuEFIStorePath = efiCandidate
+                }
+                qemuUEFIFirmwarePath = findAArch64UEFIFirmware()
+
+                if DiskImageFormat.auto.resolved(forPath: diskURL.path) == .qcow2 {
+                    importMode = .reference
+                }
+                break
+            }
 
             // Try known UTM plist keys for auxiliary storage.
             if auxiliaryStoragePath == nil {
@@ -603,6 +752,46 @@ struct VMImportView: View {
         }
     }
 
+    private func resolveUTMDataPath(_ path: String, bundleDir: URL, dataDir: URL) -> URL {
+        if path.hasPrefix("/") {
+            return URL(fileURLWithPath: path)
+        }
+        if path.hasPrefix("Data/") {
+            return URL(fileURLWithPath: (bundleDir.path as NSString).appendingPathComponent(path))
+        }
+        return URL(fileURLWithPath: (dataDir.path as NSString).appendingPathComponent(path))
+    }
+
+    private func findAArch64UEFIFirmware() -> URL? {
+        let fm = FileManager.default
+        var candidates: [String] = []
+
+        if let envPath = ProcessInfo.processInfo.environment["VORTEX_AARCH64_UEFI"],
+           !envPath.isEmpty {
+            candidates.append(envPath)
+        }
+
+        candidates.append(contentsOf: [
+            "/Applications/UTM.app/Contents/Resources/qemu/edk2-aarch64-code.fd",
+            "/opt/homebrew/share/qemu/edk2-aarch64-code.fd",
+            "/usr/local/share/qemu/edk2-aarch64-code.fd",
+        ])
+
+        for cellar in ["/opt/homebrew/Cellar/qemu", "/usr/local/Cellar/qemu"] {
+            if let versions = try? fm.contentsOfDirectory(atPath: cellar) {
+                candidates.append(contentsOf: versions.map {
+                    ((cellar as NSString).appendingPathComponent($0) as NSString)
+                        .appendingPathComponent("share/qemu/edk2-aarch64-code.fd")
+                })
+            }
+        }
+
+        guard let match = candidates.first(where: { fm.fileExists(atPath: $0) }) else {
+            return nil
+        }
+        return URL(fileURLWithPath: match)
+    }
+
     // MARK: - File Size Display
 
     private func diskImageFileSize(_ url: URL) -> String? {
@@ -636,8 +825,11 @@ struct VMImportView: View {
         let vmID = UUID()
         let trimmedName = vmName.trimmingCharacters(in: .whitespaces)
 
+        let sourceImageFormat = DiskImageFormat.auto.resolved(forPath: sourceURL.path)
+
         // Build the VM configuration.
-        let bundleDiskPath = fileManager.diskPath(vmID: vmID, diskName: "boot.img")
+        let bundleDiskName = sourceImageFormat == .qcow2 ? "boot.qcow2" : "boot.img"
+        let bundleDiskPath = fileManager.diskPath(vmID: vmID, diskName: bundleDiskName)
         let auxBundlePath = fileManager.subdirectoryPath(.auxiliary, for: vmID)
             .appendingPathComponent("AuxiliaryStorage")
         let hardwareModelBundlePath = fileManager.subdirectoryPath(.auxiliary, for: vmID)
@@ -661,8 +853,9 @@ struct VMImportView: View {
             return
         }
 
-        // Determine if this is a macOS VM based on companion files.
+        // Determine import mode based on discovered companion/config files.
         let isMacOS = hasCompleteMacPlatformArtifacts
+        let isNativeQEMU = isQEMUUTMConfig
 
         let resolvedDiskPath = shouldReferenceOriginalFiles ? sourceURL.path : bundleDiskPath.path
         let resolvedAuxiliaryPath = shouldReferenceOriginalFiles ? auxiliaryStoragePath?.path : auxBundlePath.path
@@ -675,8 +868,45 @@ struct VMImportView: View {
             fallbackDestination: machineIdBundlePath
         )
 
+        let efiStorePath = fileManager.subdirectoryPath(.efi, for: vmID)
+            .appendingPathComponent("efi_vars.fd")
+
         let config: VMConfiguration
-        if isMacOS {
+        if isNativeQEMU {
+            guard let qemuEFIStorePath, let qemuUEFIFirmwarePath else {
+                importError = "Import failed: QEMU UEFI import requires efi_vars.fd and AArch64 EDK2 firmware."
+                isImporting = false
+                return
+            }
+            let resolvedEFIStorePath = shouldReferenceOriginalFiles
+                ? qemuEFIStorePath.path
+                : efiStorePath.path
+
+            config = VMConfiguration(
+                id: vmID,
+                identity: VMIdentity(name: trimmedName, iconName: "pc"),
+                guestOS: .linuxARM64,
+                backend: .vortexHV,
+                hardware: HardwareProfile(cpuCoreCount: cpuCores, memoryGiB: UInt64(memoryGiB)),
+                storage: StorageConfiguration(disks: [
+                    DiskConfig(
+                        label: "Boot Disk",
+                        imagePath: resolvedDiskPath,
+                        imageFormat: sourceImageFormat,
+                        sizeBytes: diskSizeBytes
+                    )
+                ]),
+                network: .singleNAT,
+                display: .standard,
+                audio: .disabled,
+                clipboard: .disabled,
+                rosetta: .disabled,
+                bootConfig: .uefi(
+                    storePath: resolvedEFIStorePath,
+                    firmwarePath: qemuUEFIFirmwarePath.path
+                )
+            )
+        } else if isMacOS {
             config = VMConfiguration(
                 id: vmID,
                 identity: VMIdentity(name: trimmedName, iconName: "desktopcomputer"),
@@ -686,6 +916,7 @@ struct VMImportView: View {
                     DiskConfig(
                         label: "Boot Disk",
                         imagePath: resolvedDiskPath,
+                        imageFormat: sourceImageFormat,
                         sizeBytes: diskSizeBytes
                     )
                 ]),
@@ -700,8 +931,6 @@ struct VMImportView: View {
                 )
             )
         } else {
-            let efiStorePath = fileManager.subdirectoryPath(.efi, for: vmID)
-                .appendingPathComponent("efi_vars.fd")
             config = VMConfiguration(
                 id: vmID,
                 identity: VMIdentity(name: trimmedName, iconName: "pc"),
@@ -711,6 +940,7 @@ struct VMImportView: View {
                     DiskConfig(
                         label: "Boot Disk",
                         imagePath: resolvedDiskPath,
+                        imageFormat: sourceImageFormat,
                         sizeBytes: diskSizeBytes
                     )
                 ]),
@@ -734,6 +964,11 @@ struct VMImportView: View {
             } else {
                 importProgress = "Copying disk image..."
                 try cloneFile(from: sourceURL, to: bundleDiskPath)
+            }
+
+            if isNativeQEMU, !shouldReferenceOriginalFiles, let qemuEFIStorePath {
+                importProgress = "Copying EFI variable store..."
+                try copyFile(from: qemuEFIStorePath, to: efiStorePath)
             }
 
             // Step 3: Copy companion files.

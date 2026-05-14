@@ -180,11 +180,8 @@ public struct VMConfiguration: Codable, Identifiable, Sendable, Hashable {
             if bootConfig.mode == .macOS {
                 issues.append("VortexHV backend cannot use macOS boot mode.")
             }
-            if !network.interfaces.isEmpty {
-                issues.append("VortexHV backend does not support virtual networking yet.")
-            }
-            if audio.enabled {
-                issues.append("VortexHV backend does not support audio devices yet.")
+            if audio.enabled && bootConfig.mode != .uefi {
+                issues.append("VortexHV audio currently requires UEFI boot with PCI virtio devices.")
             }
             if usb.enabled {
                 issues.append("VortexHV backend does not support USB passthrough yet.")
@@ -287,6 +284,7 @@ public struct VMConfiguration: Codable, Identifiable, Sendable, Hashable {
 
         let bootPaths = [
             bootConfig.uefiStorePath,
+            bootConfig.uefiFirmwarePath,
             bootConfig.kernelPath,
             bootConfig.initrdPath,
             bootConfig.macOSRestoreImagePath,

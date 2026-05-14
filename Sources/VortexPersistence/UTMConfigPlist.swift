@@ -14,6 +14,21 @@ import Foundation
 /// Older layouts may also expose the auxiliary storage path under
 /// `Virtualization.MacAuxiliaryStorage`.
 public struct UTMConfigPlist: Decodable, Sendable {
+    public struct Drive: Decodable, Sendable {
+        public let identifier: String?
+        public let imageName: String?
+        public let imageType: String?
+        public let interface: String?
+        public let readOnly: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case identifier = "Identifier"
+            case imageName = "ImageName"
+            case imageType = "ImageType"
+            case interface = "Interface"
+            case readOnly = "ReadOnly"
+        }
+    }
 
     public struct Information: Decodable, Sendable {
         public let name: String?
@@ -26,9 +41,11 @@ public struct UTMConfigPlist: Decodable, Sendable {
     public struct System: Decodable, Sendable {
         public struct Boot: Decodable, Sendable {
             public let operatingSystem: String?
+            public let efiVariableStoragePath: String?
 
             enum CodingKeys: String, CodingKey {
                 case operatingSystem = "OperatingSystem"
+                case efiVariableStoragePath = "EfiVariableStoragePath"
             }
         }
 
@@ -45,15 +62,27 @@ public struct UTMConfigPlist: Decodable, Sendable {
         }
 
         public let boot: Boot?
+        public let architecture: String?
         public let cpuCount: Int?
         public let macPlatform: MacPlatform?
         public let memorySize: Int?
+        public let target: String?
 
         enum CodingKeys: String, CodingKey {
             case boot = "Boot"
+            case architecture = "Architecture"
             case cpuCount = "CPUCount"
             case macPlatform = "MacPlatform"
             case memorySize = "MemorySize"
+            case target = "Target"
+        }
+    }
+
+    public struct QEMU: Decodable, Sendable {
+        public let uefiBoot: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case uefiBoot = "UEFIBoot"
         }
     }
 
@@ -66,11 +95,17 @@ public struct UTMConfigPlist: Decodable, Sendable {
     }
 
     public let information: Information?
+    public let backend: String?
+    public let drives: [Drive]?
+    public let qemu: QEMU?
     public let system: System?
     public let virtualization: Virtualization?
 
     enum CodingKeys: String, CodingKey {
         case information = "Information"
+        case backend = "Backend"
+        case drives = "Drive"
+        case qemu = "QEMU"
         case system = "System"
         case virtualization = "Virtualization"
     }
@@ -85,9 +120,31 @@ public struct UTMConfigPlist: Decodable, Sendable {
         system?.boot?.operatingSystem == "macOS" || system?.macPlatform != nil
     }
 
+    /// True when the config appears to describe a QEMU AArch64 Linux `virt` VM.
+    public var isQEMUAArch64Linux: Bool {
+        backend == "QEMU"
+            && system?.architecture == "aarch64"
+            && (system?.target == nil || system?.target == "virt")
+            && !isMacOS
+    }
+
+    public var isQEMUUEFIBoot: Bool {
+        qemu?.uefiBoot == true || system?.boot?.efiVariableStoragePath != nil
+    }
+
     /// Auxiliary storage path relative to the bundle's `Data/` directory.
     public var auxiliaryStorageRelativePath: String? {
         system?.macPlatform?.auxiliaryStoragePath ?? virtualization?.macAuxiliaryStorage
+    }
+
+    /// EFI variable store path relative to the bundle's `Data/` directory.
+    public var efiVariableStorageRelativePath: String? {
+        system?.boot?.efiVariableStoragePath
+    }
+
+    /// Return the UTM drive entry matching a selected disk image path.
+    public func drive(imageName: String) -> Drive? {
+        drives?.first { $0.imageName == imageName }
     }
 
     public var embeddedHardwareModelData: Data? {

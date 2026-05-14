@@ -1,43 +1,50 @@
 // VMController.swift -- Per-VM lifecycle controller with audio bridge management.
 // VortexService
 //
-// Owns a VZVirtualMachine instance and exposes its state for the UI.
-// Handles start/stop/pause/resume and audio bridge attach/detach.
+// Owns a VM backend instance and exposes its state for the UI.
+// Handles start/stop/pause/resume and backend-specific attach/detach work.
 
 import Foundation
 import Observation
 import Virtualization
 import VortexAudio
 import VortexCore
+import VortexHV
+import VortexLinux
 import VortexPersistence
 import VortexVZ
 
 // MARK: - VMController
 
-/// Owns a `VZVirtualMachine` and exposes its state for the UI.
+/// Owns one running VM backend and exposes its state for the UI.
 ///
 /// Each running VM gets exactly one controller. The controller manages:
 /// - VM lifecycle (start, stop, pause, resume)
-/// - VZ state observation and mapping to UI-visible properties
-/// - Audio bridge attach/detach on VM start/stop
+/// - Backend state observation and mapping to UI-visible properties
+/// - Audio bridge attach/detach on VZ VM start/stop
 /// - Audio config persistence when settings change
 /// - Guest connection state and audio device hot-plug monitoring
 @MainActor
 @Observable
 public final class VMController: Identifiable {
     public let id: UUID
-    public let vm: VZVirtualMachine
-    public let manager: VZVMManager
+    public let vm: VZVirtualMachine?
+    public let nativeLinuxVM: NativeLinuxVM?
+    public let manager: VZVMManager?
     public var config: VMConfiguration
 
     public var stateLabel: String = "Stopped"
     public var isRunning: Bool = false
     public var isPaused: Bool = false
     public var canStart: Bool = true
+    public var canPause: Bool = false
+    public var canResume: Bool = false
     public var canStop: Bool = false
     public var errorMessage: String?
     public var showAudioSettings: Bool = false
     public var isStarting: Bool = false
+    public var serialConsoleText: String = ""
+    public var nativeFramebuffer: NativeLinuxFramebuffer?
 
     /// Whether the guest audio daemon has connected to the bridge.
     ///
@@ -61,11 +68,14 @@ public final class VMController: Identifiable {
         let inputName = config.audio.input?.hostDeviceName
 
         if outputName == nil && inputName == nil {
+            if nativeLinuxVM != nil {
+                return "System default audio"
+            }
             return "No audio -- configure in Audio Settings"
         }
 
-        let output = outputName ?? "None"
-        let input = inputName ?? "None"
+        let output = outputName ?? (nativeLinuxVM != nil ? "System default" : "None")
+        let input = inputName ?? (nativeLinuxVM != nil ? "System default" : "None")
         return "Out: \(output) | In: \(input)"
     }
 
@@ -86,6 +96,7 @@ public final class VMController: Identifiable {
     ) {
         self.id = config.id
         self.vm = vm
+        self.nativeLinuxVM = nil
         self.manager = manager
         self.config = config
         self.ownerLock = ownerLock
@@ -109,6 +120,37 @@ public final class VMController: Identifiable {
         }
     }
 
+    public init(
+        nativeLinuxVM: NativeLinuxVM,
+        config: VMConfiguration,
+        ownerLock: VMOwnerLock
+    ) {
+        self.id = config.id
+        self.vm = nil
+        self.nativeLinuxVM = nativeLinuxVM
+        self.manager = nil
+        self.config = config
+        self.ownerLock = ownerLock
+        self.vmnetNetworkStatuses = []
+
+        nativeLinuxVM.onSerialOutput = { [weak self] byte in
+            Task { @MainActor in
+                self?.appendSerialByte(byte)
+            }
+        }
+        nativeLinuxVM.onFramebufferUpdated = { [weak self] framebuffer in
+            Task { @MainActor in
+                self?.nativeFramebuffer = framebuffer
+            }
+        }
+        nativeLinuxVM.vm.lifecycle.onStateChange = { [weak self] state, _ in
+            Task { @MainActor in
+                self?.updateNativeState(state)
+            }
+        }
+        updateNativeState(nativeLinuxVM.vm.lifecycle.state)
+    }
+
     deinit {
         ownerLock?.release()
     }
@@ -120,8 +162,12 @@ public final class VMController: Identifiable {
             VortexLog.service.debug("Ignoring duplicate start request for VM \(self.config.id)")
             return
         }
-        guard vm.canStart else {
+        if let vm, !vm.canStart {
             updateFromVZState()
+            VortexLog.service.debug("Ignoring start request for VM \(self.config.id) in state \(self.stateLabel)")
+            return
+        }
+        if nativeLinuxVM != nil, !canStart {
             VortexLog.service.debug("Ignoring start request for VM \(self.config.id) in state \(self.stateLabel)")
             return
         }
@@ -130,52 +176,104 @@ public final class VMController: Identifiable {
         canStart = false
         errorMessage = nil
         do {
-            try await manager.start(vm)
-            updateFromVZState()
-            attachAudioBridge()
-            startBridgePolling()
-            startDeviceWatcher()
+            if let vm, let manager {
+                try await manager.start(vm)
+                updateFromVZState()
+                attachAudioBridge()
+                startBridgePolling()
+                startDeviceWatcher()
+            } else if let nativeLinuxVM {
+                try await Task.detached {
+                    try nativeLinuxVM.start()
+                }.value
+                updateNativeState(nativeLinuxVM.vm.lifecycle.state)
+            }
         } catch {
             errorMessage = error.localizedDescription
             stateLabel = "Error"
-            canStart = vm.canStart
+            canStart = vm?.canStart ?? true
         }
         isStarting = false
     }
 
     public func stop() async {
-        guard vm.canRequestStop || vm.canStop else { return }
+        if let vm {
+            guard vm.canRequestStop || vm.canStop else { return }
+        } else {
+            guard canStop else { return }
+        }
         stateLabel = "Stopping"
         canStop = false
         stopBridgePolling()
         stopDeviceWatcher()
         detachAudioBridge()
         do {
-            try await manager.stop(vm)
-            updateFromVZState()
+            if let vm, let manager {
+                try await manager.stop(vm)
+                updateFromVZState()
+            } else if let nativeLinuxVM {
+                try await Task.detached {
+                    try nativeLinuxVM.stop()
+                }.value
+                updateNativeState(nativeLinuxVM.vm.lifecycle.state)
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
     public func pause() async {
-        guard vm.canPause else { return }
+        guard canPause else { return }
         do {
-            try await manager.pause(vm)
-            updateFromVZState()
+            if let vm, let manager {
+                try await manager.pause(vm)
+                updateFromVZState()
+            } else if let nativeLinuxVM {
+                try await Task.detached {
+                    try nativeLinuxVM.vm.pause()
+                }.value
+                updateNativeState(nativeLinuxVM.vm.lifecycle.state)
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
     public func resume() async {
-        guard vm.canResume else { return }
+        guard canResume else { return }
         do {
-            try await manager.resume(vm)
-            updateFromVZState()
+            if let vm, let manager {
+                try await manager.resume(vm)
+                updateFromVZState()
+            } else if let nativeLinuxVM {
+                try await Task.detached {
+                    try nativeLinuxVM.vm.resume()
+                }.value
+                updateNativeState(nativeLinuxVM.vm.lifecycle.state)
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    public func sendNativeKey(code: UInt16, pressed: Bool) {
+        nativeLinuxVM?.sendKey(code: code, pressed: pressed)
+    }
+
+    public func sendNativePointer(
+        x: UInt32,
+        y: UInt32,
+        leftButton: Bool,
+        rightButton: Bool,
+        middleButton: Bool
+    ) {
+        nativeLinuxVM?.sendPointer(
+            x: x,
+            y: y,
+            leftButton: leftButton,
+            rightButton: rightButton,
+            middleButton: middleButton
+        )
     }
 
     // MARK: - Audio Bridge
@@ -193,7 +291,9 @@ public final class VMController: Identifiable {
             return
         }
 
-        VortexLog.service.debug("VM socket devices: \(self.vm.socketDevices.count)")
+        guard let vm else { return }
+
+        VortexLog.service.debug("VM socket devices: \(self.vm?.socketDevices.count ?? 0)")
         for (i, dev) in vm.socketDevices.enumerated() {
             VortexLog.service.debug("  device[\(i)]: \(String(describing: type(of: dev)))")
         }
@@ -354,17 +454,59 @@ public final class VMController: Identifiable {
         isPaused = (state == .paused)
         isStarting = (state == .starting)
         canStart = state.canStart
+        canPause = state.canPause
+        canResume = state.canResume
         canStop = state.canStop
     }
 
     public func updateFromVZState() {
+        guard let vm else {
+            if let nativeLinuxVM {
+                updateNativeState(nativeLinuxVM.vm.lifecycle.state)
+            }
+            return
+        }
         let vzState = vm.state
         stateLabel = vzStateName(vzState).capitalized
         isRunning = (vzState == .running)
         isPaused = (vzState == .paused)
         isStarting = (vzState == .starting)
         canStart = vm.canStart
+        canPause = vm.canPause
+        canResume = vm.canResume
         canStop = vm.canRequestStop || vm.canStop
+    }
+
+    private func updateNativeState(_ state: VortexHV.VMLifecycle.State) {
+        stateLabel = state.rawValue.capitalized
+        isRunning = (state == .running)
+        isPaused = (state == .paused)
+        isStarting = (state == .starting)
+        canStart = (state == .stopped || state == .error)
+        canPause = (state == .running)
+        canResume = (state == .paused)
+        canStop = (state == .running || state == .paused)
+        if state == .error {
+            errorMessage = nativeLinuxVM?.vm.lifecycle.errorMessage ?? errorMessage
+        }
+    }
+
+    private func appendSerialByte(_ byte: UInt8) {
+        switch byte {
+        case 0x08, 0x7F:
+            if !serialConsoleText.isEmpty {
+                serialConsoleText.removeLast()
+            }
+        case 0x0D:
+            break
+        default:
+            serialConsoleText.append(Character(UnicodeScalar(byte)))
+        }
+
+        let maxCharacters = 64 * 1024
+        if serialConsoleText.count > maxCharacters {
+            serialConsoleText.removeFirst(serialConsoleText.count - maxCharacters)
+        }
     }
 
     public func releaseOwnerLock() {

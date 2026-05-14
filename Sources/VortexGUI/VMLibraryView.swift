@@ -686,7 +686,7 @@ private struct VMDetailContent: View {
                     Label("Pause", systemImage: "pause.fill")
                 }
                 .buttonStyle(.bordered)
-                .disabled(controller?.vm.canPause != true)
+                .disabled(controller?.canPause != true)
             }
 
             if controller?.isPaused == true {

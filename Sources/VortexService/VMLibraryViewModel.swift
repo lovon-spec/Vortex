@@ -10,6 +10,7 @@ import Observation
 import Virtualization
 import VortexAudio
 import VortexCore
+import VortexLinux
 import VortexPersistence
 import VortexVZ
 
@@ -151,21 +152,30 @@ public final class VMLibraryViewModel {
         }
 
         let ownerLock = try VMOwnerLock.acquire(vmID: id, fileManager: fileManager)
-        let vm: VZVirtualMachine
+        let controller: VMController
         do {
-            vm = try manager.createVM(config: config)
+            switch config.backend {
+            case .appleVirtualization:
+                let vm = try manager.createVM(config: config)
+                controller = VMController(
+                    vm: vm,
+                    manager: manager,
+                    config: config,
+                    ownerLock: ownerLock
+                )
+            case .vortexHV:
+                let nativeVM = try NativeLinuxVM(configuration: config)
+                controller = VMController(
+                    nativeLinuxVM: nativeVM,
+                    config: config,
+                    ownerLock: ownerLock
+                )
+            }
         } catch {
             VmnetNetworkRegistry.shared.releaseNetworks(for: config.network.interfaces)
             ownerLock.release()
             throw error
         }
-
-        let controller = VMController(
-            vm: vm,
-            manager: manager,
-            config: config,
-            ownerLock: ownerLock
-        )
         runningControllers[id] = controller
         return controller
     }

@@ -145,7 +145,8 @@ public final class VirtualMachine: @unchecked Sendable {
         at gpa: UInt64 = MachineMemoryMap.dtbAddress,
         initrdStart: UInt64? = nil,
         initrdEnd: UInt64? = nil,
-        virtioMMIODeviceCount: Int = 0
+        virtioMMIODeviceCount: Int = 0,
+        includePCIHostBridge: Bool = false
     ) -> (gpa: UInt64, size: Int) {
         let builder = DTBBuilder(
             cpuCount: config.cpuCount,
@@ -153,6 +154,7 @@ public final class VirtualMachine: @unchecked Sendable {
             ramSize: config.ramSize,
             bootArgs: bootArgs ?? config.bootArgs,
             virtioMMIODeviceCount: virtioMMIODeviceCount,
+            includePCIHostBridge: includePCIHostBridge,
             initrdStart: initrdStart,
             initrdEnd: initrdEnd
         )
@@ -174,9 +176,10 @@ public final class VirtualMachine: @unchecked Sendable {
         try lifecycle.transitionToStarting()
 
         do {
-            for thread in vcpuThreads {
-                try thread.start()
+            guard let bootCPU = vcpuThreads.first else {
+                throw VMError.noVCPUs
             }
+            try bootCPU.start()
             try lifecycle.transitionToRunning()
         } catch {
             lifecycle.transitionToError(message: "Failed to start vCPUs: \(error)")
@@ -296,6 +299,18 @@ public final class VirtualMachine: @unchecked Sendable {
         thread.onVTimerActivated = { [weak self] vcpu in
             self?.timer.handleVTimerActivated(vcpu: vcpu)
         }
+
+        thread.onVCPUStopped = { [weak self] _ in
+            guard let self, cpuIndex == 0 else { return }
+            switch self.lifecycle.state {
+            case .starting, .running:
+                self.lifecycle.transitionToError(message: "Boot vCPU stopped unexpectedly.")
+            case .paused:
+                self.lifecycle.transitionToError(message: "Boot vCPU stopped while paused.")
+            case .stopped, .stopping, .error:
+                break
+            }
+        }
     }
 
     // MARK: - PSCI Handler
@@ -325,6 +340,11 @@ public final class VirtualMachine: @unchecked Sendable {
             let cpuIndex = Int(targetCPU & 0xFF) // Aff0 is the CPU index
             if cpuIndex < vcpuThreads.count {
                 let targetThread = vcpuThreads[cpuIndex]
+                guard !targetThread.isRunning else {
+                    _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, UInt64(bitPattern: -2)) // ALREADY_ON
+                    advancePC(vcpu: vcpu)
+                    return true
+                }
                 targetThread.onVCPUCreated = { vcpu in
                     _ = hv_vcpu_set_reg(vcpu, HV_REG_PC, entryPoint)
                     _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, contextID)
@@ -355,6 +375,7 @@ public final class VirtualMachine: @unchecked Sendable {
             for thread in vcpuThreads {
                 thread.cancel()
             }
+            lifecycle.forceStop()
             return false // Stop the vCPU run loop
 
         case 0x8400_0009: // PSCI_SYSTEM_RESET
@@ -362,6 +383,7 @@ public final class VirtualMachine: @unchecked Sendable {
             for thread in vcpuThreads {
                 thread.cancel()
             }
+            lifecycle.transitionToError(message: "Guest requested PSCI SYSTEM_RESET.")
             return false
 
         case 0x8400_0001: // PSCI_CPU_SUSPEND
@@ -403,6 +425,7 @@ public final class VirtualMachine: @unchecked Sendable {
 public enum VMError: Error, CustomStringConvertible {
     case hvVMCreateFailed(code: hv_return_t)
     case alreadyRunning
+    case noVCPUs
     case notRunning
 
     public var description: String {
@@ -411,6 +434,8 @@ public enum VMError: Error, CustomStringConvertible {
             return "hv_vm_create failed with error code \(code)"
         case .alreadyRunning:
             return "VM is already running"
+        case .noVCPUs:
+            return "VM has no vCPUs"
         case .notRunning:
             return "VM is not running"
         }

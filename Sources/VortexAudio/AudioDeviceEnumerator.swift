@@ -89,6 +89,18 @@ public final class AudioDeviceEnumerator: @unchecked Sendable {
         try allDevices().filter(\.isInput)
     }
 
+    /// Returns the current system default output device, if it is output-capable.
+    public func defaultOutputDevice() throws -> AudioHostDevice? {
+        try defaultDevice(selector: kAudioHardwarePropertyDefaultOutputDevice)
+            .flatMap { device in device.isOutput ? device : nil }
+    }
+
+    /// Returns the current system default input device, if it is input-capable.
+    public func defaultInputDevice() throws -> AudioHostDevice? {
+        try defaultDevice(selector: kAudioHardwarePropertyDefaultInputDevice)
+            .flatMap { device in device.isInput ? device : nil }
+    }
+
     /// Find a device by its persistent UID string.
     public func device(uid: String) throws -> AudioHostDevice? {
         try allDevices().first { $0.uid == uid }
@@ -189,6 +201,35 @@ public final class AudioDeviceEnumerator: @unchecked Sendable {
         }
 
         return deviceIDs
+    }
+
+    /// Return one of CoreAudio's system default device objects.
+    private func defaultDevice(
+        selector: AudioObjectPropertySelector
+    ) throws -> AudioHostDevice? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        var deviceID = AudioDeviceID(kAudioObjectUnknown)
+        var dataSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &dataSize,
+            &deviceID
+        )
+        guard status == noErr else {
+            throw AudioDeviceError.coreAudioError(status, "GetPropertyData for default device")
+        }
+        guard deviceID != kAudioObjectUnknown else {
+            return nil
+        }
+        return try deviceInfo(for: deviceID)
     }
 
     /// Build an `AudioHostDevice` for a single device ID.

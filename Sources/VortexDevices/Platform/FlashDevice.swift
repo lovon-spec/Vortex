@@ -223,6 +223,7 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
 
     /// The file URL for the VARS bank persistence.
     private let varsFileURL: URL?
+    private let varsFlushHandler: (@Sendable (Data) throws -> Void)?
 
     /// Whether the VARS bank has been modified since last flush.
     private var varsDirty = false
@@ -239,7 +240,8 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
     ///     VARS bank is initialized to all 0xFF (erased flash). Padded or truncated
     ///     to `bankSize`.
     ///   - varsFileURL: Path to persist the VARS bank. If `nil`, changes are
-    ///     not persisted to disk.
+    ///     not persisted to disk unless `varsFlushHandler` is supplied.
+    ///   - varsFlushHandler: Optional custom persistence callback for VARS data.
     ///   - bankSize: Size of each bank in bytes. Both banks are the same size.
     ///   - blockSize: Erase block size in bytes.
     public init(
@@ -247,6 +249,7 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
         firmwareData: Data,
         varsData: Data? = nil,
         varsFileURL: URL? = nil,
+        varsFlushHandler: (@Sendable (Data) throws -> Void)? = nil,
         bankSize: Int = FlashDevice.defaultBankSize,
         blockSize: Int = FlashDevice.defaultBlockSize
     ) {
@@ -254,6 +257,7 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
         self.bankSize = bankSize
         self.regionSize = UInt64(bankSize * 2)
         self.varsFileURL = varsFileURL
+        self.varsFlushHandler = varsFlushHandler
 
         // Prepare CODE bank: pad firmware to bankSize, read-only.
         var code = firmwareData
@@ -324,15 +328,22 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
     /// - Throws: If the file write fails.
     public func flush() throws {
         lock.lock()
-        guard varsDirty, let url = varsFileURL else {
+        guard varsDirty else {
             lock.unlock()
             return
         }
         let data = varsBank.data
-        varsDirty = false
         lock.unlock()
 
-        try data.write(to: url, options: .atomic)
+        if let varsFlushHandler {
+            try varsFlushHandler(data)
+        } else if let url = varsFileURL {
+            try data.write(to: url, options: .atomic)
+        }
+
+        lock.lock()
+        varsDirty = false
+        lock.unlock()
     }
 
     /// Whether the VARS bank has unsaved modifications.

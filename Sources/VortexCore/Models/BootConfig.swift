@@ -8,8 +8,11 @@ public struct BootConfig: Codable, Sendable, Hashable {
     /// The boot mechanism to use.
     public var mode: BootMode
 
-    /// Path to the UEFI firmware image (required for UEFI mode).
+    /// Path to the EFI variable store file (used for UEFI mode).
     public var uefiStorePath: String?
+
+    /// Path to the UEFI firmware code image (used by native HV UEFI mode).
+    public var uefiFirmwarePath: String?
 
     /// Path to the kernel image (used for direct Linux kernel boot).
     public var kernelPath: String?
@@ -38,6 +41,7 @@ public struct BootConfig: Codable, Sendable, Hashable {
     public init(
         mode: BootMode,
         uefiStorePath: String? = nil,
+        uefiFirmwarePath: String? = nil,
         kernelPath: String? = nil,
         kernelCommandLine: String? = nil,
         initrdPath: String? = nil,
@@ -48,6 +52,7 @@ public struct BootConfig: Codable, Sendable, Hashable {
     ) {
         self.mode = mode
         self.uefiStorePath = uefiStorePath
+        self.uefiFirmwarePath = uefiFirmwarePath
         self.kernelPath = kernelPath
         self.kernelCommandLine = kernelCommandLine
         self.initrdPath = initrdPath
@@ -81,11 +86,14 @@ public struct BootConfig: Codable, Sendable, Hashable {
     }
 
     /// Create a UEFI boot configuration (for Linux/Windows guests).
-    /// - Parameter storePath: Path to the EFI variable store file.
-    public static func uefi(storePath: String) -> BootConfig {
+    /// - Parameters:
+    ///   - storePath: Path to the EFI variable store file.
+    ///   - firmwarePath: Optional path to the UEFI firmware code image.
+    public static func uefi(storePath: String, firmwarePath: String? = nil) -> BootConfig {
         BootConfig(
             mode: .uefi,
-            uefiStorePath: storePath
+            uefiStorePath: storePath,
+            uefiFirmwarePath: firmwarePath
         )
     }
 

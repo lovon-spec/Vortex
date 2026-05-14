@@ -52,6 +52,7 @@ public final class DTBBuilder {
     private let virtioMMIOSize: UInt64
     private let virtioMMIOStride: UInt64
     private let virtioMMIOIRQBase: UInt32
+    private let includePCIHostBridge: Bool
     private let initrdStart: UInt64?
     private let initrdEnd: UInt64?
 
@@ -77,6 +78,7 @@ public final class DTBBuilder {
         virtioMMIOSize: UInt64 = MachineMemoryMap.virtioMMIODeviceSize,
         virtioMMIOStride: UInt64 = MachineMemoryMap.virtioMMIODeviceStride,
         virtioMMIOIRQBase: UInt32 = MachineIRQ.virtioMMIOBase,
+        includePCIHostBridge: Bool = false,
         initrdStart: UInt64? = nil,
         initrdEnd: UInt64? = nil
     ) {
@@ -96,6 +98,7 @@ public final class DTBBuilder {
         self.virtioMMIOSize = virtioMMIOSize
         self.virtioMMIOStride = virtioMMIOStride
         self.virtioMMIOIRQBase = virtioMMIOIRQBase
+        self.includePCIHostBridge = includePCIHostBridge
         self.initrdStart = initrdStart
         self.initrdEnd = initrdEnd
     }
@@ -144,6 +147,9 @@ public final class DTBBuilder {
 
         // -- virtio-mmio devices --
         buildVirtioMMIONodes()
+
+        // -- PCI host bridge --
+        buildPCIHostBridgeNode()
 
         // -- PSCI node --
         buildPSCINode()
@@ -265,6 +271,62 @@ public final class DTBBuilder {
             addProperty("interrupts", u32Array: [0, intid - 32, 4])
             endNode()
         }
+    }
+
+    private func buildPCIHostBridgeNode() {
+        guard includePCIHostBridge else { return }
+
+        beginNode("pcie@\(String(MachineMemoryMap.pciEcamBase, radix: 16))")
+        addProperty("compatible", stringList: ["pci-host-ecam-generic"])
+        addProperty("device_type", string: "pci")
+        addProperty("#address-cells", u32: 3)
+        addProperty("#size-cells", u32: 2)
+        addProperty("#interrupt-cells", u32: 1)
+        addProperty("reg", u64Pair: (MachineMemoryMap.pciEcamBase, MachineMemoryMap.pciEcamSize))
+        addProperty("bus-range", u32Array: [0, 0])
+        addProperty("dma-coherent", empty: true)
+
+        var ranges: [UInt32] = []
+        appendPCIAddress(&ranges, space: 0x0200_0000, address: MachineMemoryMap.pciMmio32Base)
+        appendU64Cells(&ranges, MachineMemoryMap.pciMmio32Base)
+        appendU64Cells(&ranges, MachineMemoryMap.pciMmio32Size)
+        appendPCIAddress(&ranges, space: 0x0300_0000, address: MachineMemoryMap.pciMmio64Base)
+        appendU64Cells(&ranges, MachineMemoryMap.pciMmio64Base)
+        appendU64Cells(&ranges, MachineMemoryMap.pciMmio64Size)
+        addProperty("ranges", u32Array: ranges)
+
+        addProperty("interrupt-map-mask", u32Array: [0x0000_F800, 0, 0, 7])
+        addProperty("interrupt-map", u32Array: buildPCIInterruptMap())
+        endNode()
+    }
+
+    private func buildPCIInterruptMap() -> [UInt32] {
+        var values: [UInt32] = []
+        for slot in 0..<PCIBus.maxDevices {
+            for pin in 1...4 {
+                values.append(UInt32(slot) << 11)
+                values.append(0)
+                values.append(0)
+                values.append(UInt32(pin))
+                values.append(1) // GIC phandle
+                let line = UInt32((slot + pin - 1) % Int(MachineIRQ.pciIntxCount))
+                values.append(0)
+                values.append(MachineIRQ.pciIntxBase + line - 32)
+                values.append(4)
+            }
+        }
+        return values
+    }
+
+    private func appendPCIAddress(_ values: inout [UInt32], space: UInt32, address: UInt64) {
+        values.append(space)
+        values.append(UInt32(truncatingIfNeeded: address >> 32))
+        values.append(UInt32(truncatingIfNeeded: address))
+    }
+
+    private func appendU64Cells(_ values: inout [UInt32], _ value: UInt64) {
+        values.append(UInt32(truncatingIfNeeded: value >> 32))
+        values.append(UInt32(truncatingIfNeeded: value))
     }
 
     private func buildPSCINode() {

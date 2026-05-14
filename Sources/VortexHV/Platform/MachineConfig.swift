@@ -59,6 +59,7 @@ public struct VMConfig: Sendable {
 /// ```
 /// 0x0000_0000_0000 ..                           -- RAM base
 /// 0x0000_4000_0000 .. (RAM base + ramSize)       -- RAM (default 1 GiB at 0x4000_0000)
+/// 0x0000_0000 .. 0x07FF_FFFF                     -- QEMU virt pflash CODE/VARS
 /// 0x0800_0000                                    -- GIC Distributor
 /// 0x080A_0000                                    -- GIC Redistributor base
 /// 0x0900_0000                                    -- UART0 (PL011)
@@ -71,6 +72,14 @@ public struct VMConfig: Sendable {
 /// 0x80_0000_0000                                 -- PCI MMIO (64-bit window)
 /// ```
 public enum MachineMemoryMap {
+    // -- Firmware flash -----------------------------------------------------
+    /// QEMU virt pflash base. Bank 0 is CODE, bank 1 is VARS.
+    public static let flashBase: UInt64 = 0x0000_0000
+    /// Size of each QEMU virt pflash bank.
+    public static let flashBankSize: UInt64 = 0x0400_0000
+    /// Total pflash window size.
+    public static let flashSize: UInt64 = flashBankSize * 2
+
     // -- RAM ----------------------------------------------------------------
     /// Default guest RAM base address (1 GiB mark, leaving low memory for devices).
     public static let ramBase: UInt64 = 0x4000_0000

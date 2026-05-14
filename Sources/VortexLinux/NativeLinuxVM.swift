@@ -2,9 +2,22 @@
 // VortexLinux
 
 import Foundation
+import VortexAudio
 import VortexCore
 import VortexDevices
 import VortexHV
+
+public struct NativeLinuxFramebuffer: Sendable, Equatable {
+    public let width: Int
+    public let height: Int
+    public let data: Data
+
+    public init(width: Int, height: Int, data: Data) {
+        self.width = width
+        self.height = height
+        self.data = data
+    }
+}
 
 /// Native Linux VM backed by Hypervisor.framework and Vortex-owned devices.
 public final class NativeLinuxVM: @unchecked Sendable {
@@ -18,10 +31,31 @@ public final class NativeLinuxVM: @unchecked Sendable {
         }
     }
 
+    public var onFramebufferUpdated: (@Sendable (NativeLinuxFramebuffer) -> Void)? {
+        didSet {
+            gpu?.onFramebufferUpdated = { [weak self] framebuffer in
+                self?.onFramebufferUpdated?(NativeLinuxFramebuffer(
+                    width: framebuffer.width,
+                    height: framebuffer.height,
+                    data: framebuffer.data
+                ))
+            }
+        }
+    }
+
     private var uart: PL011UART?
     private var rtc: PL031RTC?
+    private var flash: FlashDevice?
+    private var gpu: VirtioGPUDevice?
     private var blockBackends: [any BlockStorageBackend] = []
     private var virtioTransports: [VirtioMMIOTransport] = []
+    private var pciBus: PCIBus?
+    private var pciHostBridge: PCIHostBridge?
+    private var pciTransports: [VirtioTransport] = []
+    private var networkBackends: [any NetworkPacketBackend] = []
+    private var audioRouter: VortexAudio.AudioRouter?
+    private var keyboardInput: VirtioInputDevice?
+    private var tabletInput: VirtioInputDevice?
 
     public init(configuration: VMConfiguration) throws {
         self.configuration = configuration
@@ -33,6 +67,7 @@ public final class NativeLinuxVM: @unchecked Sendable {
             kernelPath: configuration.bootConfig.kernelPath,
             initrdPath: configuration.bootConfig.initrdPath,
             bootArgs: configuration.bootConfig.kernelCommandLine ?? "",
+            entryPoint: Self.entryPoint(for: configuration.bootConfig),
             guestOS: .linux
         ))
 
@@ -54,6 +89,30 @@ public final class NativeLinuxVM: @unchecked Sendable {
         try vm.stop()
     }
 
+    public func sendKey(code: UInt16, pressed: Bool) {
+        keyboardInput?.sendKey(code: code, pressed: pressed)
+    }
+
+    public func sendPointer(
+        x: UInt32,
+        y: UInt32,
+        leftButton: Bool,
+        rightButton: Bool,
+        middleButton: Bool
+    ) {
+        var buttons: VirtioInputPointerButtons = []
+        if leftButton {
+            buttons.insert(.left)
+        }
+        if rightButton {
+            buttons.insert(.right)
+        }
+        if middleButton {
+            buttons.insert(.middle)
+        }
+        tabletInput?.sendTabletPointer(x: x, y: y, buttons: buttons)
+    }
+
     // MARK: - Validation
 
     private static func validate(_ configuration: VMConfiguration) throws {
@@ -65,11 +124,20 @@ public final class NativeLinuxVM: @unchecked Sendable {
         if configuration.guestOS != .linuxARM64 {
             issues.append("NativeLinuxVM requires Linux ARM64 guest OS.")
         }
-        if configuration.bootConfig.mode != .linuxKernel {
-            issues.append("Native Linux backend currently requires direct Linux kernel boot.")
-        }
-        if configuration.bootConfig.kernelPath?.isEmpty != false {
-            issues.append("Native Linux backend requires bootConfig.kernelPath.")
+        switch configuration.bootConfig.mode {
+        case .linuxKernel:
+            if configuration.bootConfig.kernelPath?.isEmpty != false {
+                issues.append("Native Linux backend requires bootConfig.kernelPath.")
+            }
+        case .uefi:
+            if configuration.bootConfig.uefiFirmwarePath?.isEmpty != false {
+                issues.append("Native Linux UEFI boot requires bootConfig.uefiFirmwarePath.")
+            }
+            if configuration.bootConfig.uefiStorePath?.isEmpty != false {
+                issues.append("Native Linux UEFI boot requires bootConfig.uefiStorePath.")
+            }
+        case .macOS:
+            issues.append("Native Linux backend cannot use macOS boot mode.")
         }
 
         if !issues.isEmpty {
@@ -96,6 +164,18 @@ public final class NativeLinuxVM: @unchecked Sendable {
         self.rtc = rtc
 
         let memory = HVGuestMemoryAccessor(memoryManager: vm.memoryManager)
+        if usesPCIVirtio {
+            try configurePCIVirtioDevices(memory: memory)
+        } else {
+            try configureMMIOVirtioDevices(memory: memory)
+        }
+    }
+
+    private var usesPCIVirtio: Bool {
+        configuration.bootConfig.mode == .uefi
+    }
+
+    private func configureMMIOVirtioDevices(memory: HVGuestMemoryAccessor) throws {
         for (index, disk) in configuration.storage.disks.enumerated() {
             let backend = try makeBlockBackend(for: disk)
             blockBackends.append(backend)
@@ -118,11 +198,160 @@ public final class NativeLinuxVM: @unchecked Sendable {
         }
     }
 
+    private func configurePCIVirtioDevices(memory: HVGuestMemoryAccessor) throws {
+        let bus = PCIBus()
+        let hostBridge = PCIHostBridge(bus: bus)
+        try vm.addDevice(hostBridge)
+
+        vm.gic.msiController?.onMSIFired = { [weak vm] intid in
+            vm?.gic.setSPI(intid: intid, level: true)
+            vm?.gic.setSPI(intid: intid, level: false)
+        }
+
+        for (index, disk) in configuration.storage.disks.enumerated() {
+            let backend = try makeBlockBackend(for: disk)
+            blockBackends.append(backend)
+
+            let block = VirtioBlockDevice(
+                backend: backend,
+                serial: "VORTEX-\(configuration.id.uuidString.prefix(8))-\(index)"
+            )
+            let transport = VirtioTransport(
+                device: block,
+                msiController: vm.gic.msiController
+            )
+            transport.attachGuestMemory(memory)
+
+            let slot = try bus.addDevice(transport)
+            transport.onINTxLevelChanged = { [weak vm] active in
+                let line = UInt32(slot % Int(MachineIRQ.pciIntxCount))
+                vm?.gic.setSPI(intid: MachineIRQ.pciIntxBase + line, level: active)
+            }
+            pciTransports.append(transport)
+        }
+
+        for (index, interface) in configuration.network.interfaces.enumerated() {
+            let macAddress = Self.macAddressBytes(
+                configured: interface.macAddress,
+                vmID: configuration.id,
+                index: index
+            )
+            let backend = VMNetPacketBackend(
+                mode: interface.mode,
+                macAddress: Self.macAddressString(macAddress)
+            )
+            networkBackends.append(backend)
+
+            let network = VirtioNetworkDevice(
+                backend: backend,
+                macAddress: macAddress
+            )
+            let transport = VirtioTransport(
+                device: network,
+                msiController: vm.gic.msiController
+            )
+            transport.attachGuestMemory(memory)
+
+            let slot = try bus.addDevice(transport)
+            transport.onINTxLevelChanged = { [weak vm] active in
+                let line = UInt32(slot % Int(MachineIRQ.pciIntxCount))
+                vm?.gic.setSPI(intid: MachineIRQ.pciIntxBase + line, level: active)
+            }
+            pciTransports.append(transport)
+        }
+
+        if configuration.audio.enabled {
+            let audioRouter = VortexAudio.AudioRouter(vmID: configuration.id.uuidString)
+            let sound = VirtioSound(
+                audioRouter: audioRouter,
+                audioConfig: configuration.audio
+            )
+            let transport = VirtioTransport(
+                device: sound,
+                msiController: vm.gic.msiController
+            )
+            transport.attachGuestMemory(memory)
+
+            let slot = try bus.addDevice(transport)
+            transport.onINTxLevelChanged = { [weak vm] active in
+                let line = UInt32(slot % Int(MachineIRQ.pciIntxCount))
+                vm?.gic.setSPI(intid: MachineIRQ.pciIntxBase + line, level: active)
+            }
+            pciTransports.append(transport)
+            self.audioRouter = audioRouter
+        }
+
+        let keyboardInput = VirtioInputDevice(profile: .keyboard)
+        let keyboardTransport = VirtioTransport(
+            device: keyboardInput,
+            msiController: vm.gic.msiController
+        )
+        keyboardTransport.attachGuestMemory(memory)
+        let keyboardSlot = try bus.addDevice(keyboardTransport)
+        keyboardTransport.onINTxLevelChanged = { [weak vm] active in
+            let line = UInt32(keyboardSlot % Int(MachineIRQ.pciIntxCount))
+            vm?.gic.setSPI(intid: MachineIRQ.pciIntxBase + line, level: active)
+        }
+        pciTransports.append(keyboardTransport)
+        self.keyboardInput = keyboardInput
+
+        let tabletInput = VirtioInputDevice(profile: .tablet(
+            width: UInt32(configuration.display.widthPixels),
+            height: UInt32(configuration.display.heightPixels)
+        ))
+        let tabletTransport = VirtioTransport(
+            device: tabletInput,
+            msiController: vm.gic.msiController
+        )
+        tabletTransport.attachGuestMemory(memory)
+        let tabletSlot = try bus.addDevice(tabletTransport)
+        tabletTransport.onINTxLevelChanged = { [weak vm] active in
+            let line = UInt32(tabletSlot % Int(MachineIRQ.pciIntxCount))
+            vm?.gic.setSPI(intid: MachineIRQ.pciIntxBase + line, level: active)
+        }
+        pciTransports.append(tabletTransport)
+        self.tabletInput = tabletInput
+
+        let gpu = VirtioGPUDevice(
+            width: UInt32(configuration.display.widthPixels),
+            height: UInt32(configuration.display.heightPixels)
+        )
+        gpu.onFramebufferUpdated = { [weak self] framebuffer in
+            self?.onFramebufferUpdated?(NativeLinuxFramebuffer(
+                width: framebuffer.width,
+                height: framebuffer.height,
+                data: framebuffer.data
+            ))
+        }
+        let gpuTransport = VirtioTransport(
+            device: gpu,
+            msiController: vm.gic.msiController
+        )
+        gpuTransport.attachGuestMemory(memory)
+        let gpuSlot = try bus.addDevice(gpuTransport)
+        gpuTransport.onINTxLevelChanged = { [weak vm] active in
+            let line = UInt32(gpuSlot % Int(MachineIRQ.pciIntxCount))
+            vm?.gic.setSPI(intid: MachineIRQ.pciIntxBase + line, level: active)
+        }
+        pciTransports.append(gpuTransport)
+        self.gpu = gpu
+
+        try hostBridge.registerBARRegions(with: vm.addressSpace)
+        self.pciBus = bus
+        self.pciHostBridge = hostBridge
+    }
+
     private func makeBlockBackend(for disk: DiskConfig) throws -> any BlockStorageBackend {
         switch disk.resolvedImageFormat {
         case .raw, .auto:
             return try RawFileBlockStorageBackend(path: disk.imagePath, readOnly: disk.readOnly)
         case .qcow2:
+            if disk.imagePath.hasPrefix("ssh://") {
+                return try SSHManagedQcow2BlockStorageBackend(
+                    imageURLString: disk.imagePath,
+                    readOnly: disk.readOnly
+                )
+            }
             return try ManagedQcow2BlockStorageBackend(
                 imagePath: disk.imagePath,
                 readOnly: disk.readOnly
@@ -130,17 +359,86 @@ public final class NativeLinuxVM: @unchecked Sendable {
         }
     }
 
+    private static func macAddressBytes(configured: String?, vmID: UUID, index: Int) -> [UInt8] {
+        if let configured,
+           let parsed = parseMACAddress(configured) {
+            return parsed
+        }
+
+        let bytes = Array(vmID.uuidString.utf8)
+        var hash = UInt64(0xcbf2_9ce4_8422_2325)
+        for byte in bytes {
+            hash ^= UInt64(byte)
+            hash &*= 0x0000_0100_0000_01b3
+        }
+        hash ^= UInt64(index)
+
+        return [
+            0x52, 0x54, 0x00,
+            UInt8((hash >> 16) & 0xff),
+            UInt8((hash >> 8) & 0xff),
+            UInt8(hash & 0xff),
+        ]
+    }
+
+    private static func parseMACAddress(_ value: String) -> [UInt8]? {
+        let parts = value.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 6 else { return nil }
+        var bytes: [UInt8] = []
+        for part in parts {
+            guard part.count == 2, let byte = UInt8(part, radix: 16) else {
+                return nil
+            }
+            bytes.append(byte)
+        }
+        return bytes
+    }
+
+    private static func macAddressString(_ bytes: [UInt8]) -> String {
+        bytes.map { String(format: "%02X", $0) }.joined(separator: ":")
+    }
+
     private func closeBlockBackends() {
         for backend in blockBackends {
             try? backend.flush()
             backend.close()
         }
+        for backend in networkBackends {
+            backend.stop()
+        }
+        audioRouter?.stop()
+        try? flash?.flush()
+        flash = nil
+        keyboardInput = nil
+        tabletInput = nil
         blockBackends.removeAll()
+        networkBackends.removeAll()
+        audioRouter = nil
     }
 
     // MARK: - Boot
 
     private func loadBootPayload() throws {
+        switch configuration.bootConfig.mode {
+        case .linuxKernel:
+            try loadDirectLinuxBootPayload()
+        case .uefi:
+            try loadUEFIBootPayload()
+        case .macOS:
+            throw VortexError.vmCreationFailed(reason: "NativeLinuxVM cannot boot macOS.")
+        }
+    }
+
+    private static func entryPoint(for bootConfig: BootConfig) -> UInt64 {
+        switch bootConfig.mode {
+        case .uefi:
+            return MachineMemoryMap.flashBase
+        case .linuxKernel, .macOS:
+            return MachineMemoryMap.kernelLoadAddress
+        }
+    }
+
+    private func loadDirectLinuxBootPayload() throws {
         guard let kernelPath = configuration.bootConfig.kernelPath else {
             throw VortexError.fileNotFound(path: "<kernel>")
         }
@@ -164,7 +462,124 @@ public final class NativeLinuxVM: @unchecked Sendable {
             bootArgs: configuration.bootConfig.kernelCommandLine,
             initrdStart: initrdStart,
             initrdEnd: initrdEnd,
-            virtioMMIODeviceCount: configuration.storage.disks.count
+            virtioMMIODeviceCount: usesPCIVirtio ? 0 : configuration.storage.disks.count,
+            includePCIHostBridge: usesPCIVirtio
         )
+    }
+
+    private func loadUEFIBootPayload() throws {
+        guard let firmwarePath = configuration.bootConfig.uefiFirmwarePath else {
+            throw VortexError.fileNotFound(path: "<uefi-firmware>")
+        }
+        guard let storePath = configuration.bootConfig.uefiStorePath else {
+            throw VortexError.fileNotFound(path: "<uefi-vars>")
+        }
+
+        let firmwareData = try Self.pflashBankData(from: firmwarePath)
+        try vm.mapROM(at: MachineMemoryMap.flashBase, data: firmwareData)
+
+        let flash: FlashDevice
+        if storePath.hasPrefix("ssh://") {
+            let resource = try SSHResource(urlString: storePath)
+            flash = FlashDevice(
+                baseAddress: MachineMemoryMap.flashBase,
+                firmwareData: firmwareData,
+                varsData: try Self.readSSHFile(resource),
+                varsFileURL: nil,
+                varsFlushHandler: { data in
+                    try Self.writeSSHFile(resource, data: data)
+                },
+                bankSize: Int(MachineMemoryMap.flashBankSize)
+            )
+        } else {
+            let varsURL = URL(fileURLWithPath: storePath)
+            let varsData = FileManager.default.fileExists(atPath: varsURL.path)
+                ? try Data(contentsOf: varsURL)
+                : nil
+            flash = FlashDevice(
+                baseAddress: MachineMemoryMap.flashBase,
+                firmwareData: firmwareData,
+                varsData: varsData,
+                varsFileURL: varsURL,
+                bankSize: Int(MachineMemoryMap.flashBankSize)
+            )
+        }
+        try vm.addDevice(flash)
+        self.flash = flash
+
+        _ = vm.loadDTB(
+            bootArgs: "",
+            virtioMMIODeviceCount: usesPCIVirtio ? 0 : configuration.storage.disks.count,
+            includePCIHostBridge: usesPCIVirtio
+        )
+    }
+
+    private static func pflashBankData(from path: String) throws -> Data {
+        var data: Data
+        if path.hasPrefix("ssh://") {
+            data = try readSSHFile(try SSHResource(urlString: path))
+        } else {
+            data = try Data(contentsOf: URL(fileURLWithPath: path))
+        }
+        let bankSize = Int(MachineMemoryMap.flashBankSize)
+        if data.count < bankSize {
+            data.append(Data(repeating: 0xFF, count: bankSize - data.count))
+        } else if data.count > bankSize {
+            data = data.prefix(bankSize)
+        }
+        return data
+    }
+
+    private static func readSSHFile(_ resource: SSHResource) throws -> Data {
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        var args = ["-o", "BatchMode=yes"]
+        if let port = resource.port {
+            args.append(contentsOf: ["-p", String(port)])
+        }
+        args.append(resource.destination)
+        args.append("cat \(shellQuote(resource.path))")
+        process.arguments = args
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let message = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            throw VortexError.diskOperationFailed(reason: "Failed to read \(resource.path) from \(resource.destination): \(message)")
+        }
+        return data
+    }
+
+    private static func writeSSHFile(_ resource: SSHResource, data: Data) throws {
+        let process = Process()
+        let stdin = Pipe()
+        let stderr = Pipe()
+        let tempPath = "\(resource.path).vortex.tmp"
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        var args = ["-o", "BatchMode=yes"]
+        if let port = resource.port {
+            args.append(contentsOf: ["-p", String(port)])
+        }
+        args.append(resource.destination)
+        args.append("cat > \(shellQuote(tempPath)) && mv \(shellQuote(tempPath)) \(shellQuote(resource.path))")
+        process.arguments = args
+        process.standardInput = stdin
+        process.standardError = stderr
+        try process.run()
+        stdin.fileHandleForWriting.write(data)
+        try stdin.fileHandleForWriting.close()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let message = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            throw VortexError.diskOperationFailed(reason: "Failed to write \(resource.path) to \(resource.destination): \(message)")
+        }
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

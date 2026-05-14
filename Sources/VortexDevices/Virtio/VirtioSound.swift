@@ -332,6 +332,9 @@ public final class VirtioSound: VirtioDeviceBase, @unchecked Sendable {
     /// Per-VM audio configuration (device UIDs, enabled state).
     private let audioConfig: AudioConfig
 
+    /// Resolves nil AudioConfig endpoints to CoreAudio's current defaults.
+    private let audioDeviceEnumerator: VortexAudio.AudioDeviceEnumerator
+
     /// Pre-allocated buffer for reading guest PCM data from descriptor chains.
     /// Avoids repeated allocation on the hot path.
     /// Sized for a generous maximum period (64KB should cover all realistic cases).
@@ -347,9 +350,14 @@ public final class VirtioSound: VirtioDeviceBase, @unchecked Sendable {
     /// - Parameters:
     ///   - audioRouter: The per-VM audio router for host device access.
     ///   - audioConfig: The VM's audio configuration (device UIDs).
-    public init(audioRouter: VortexAudio.AudioRouter, audioConfig: AudioConfig) {
+    public init(
+        audioRouter: VortexAudio.AudioRouter,
+        audioConfig: AudioConfig,
+        audioDeviceEnumerator: VortexAudio.AudioDeviceEnumerator = VortexAudio.AudioDeviceEnumerator()
+    ) {
         self.audioRouter = audioRouter
         self.audioConfig = audioConfig
+        self.audioDeviceEnumerator = audioDeviceEnumerator
 
         self.streams = [
             PCMStream(streamID: Self.outputStreamID, direction: .output),
@@ -855,14 +863,32 @@ public final class VirtioSound: VirtioDeviceBase, @unchecked Sendable {
 
         do {
             try audioRouter.configure(
-                output: stream.direction == .output ? audioConfig.output : nil,
-                input: stream.direction == .input ? audioConfig.input : nil
+                output: stream.direction == .output ? effectiveOutputEndpoint() : nil,
+                input: stream.direction == .input ? effectiveInputEndpoint() : nil
             )
         } catch {
             return VirtioSndStatus.ioError
         }
 
         return VirtioSndStatus.ok
+    }
+
+    private func effectiveOutputEndpoint() throws -> AudioEndpointConfig? {
+        if let output = audioConfig.output {
+            return output
+        }
+        return try audioDeviceEnumerator.defaultOutputDevice().map {
+            AudioEndpointConfig(hostDeviceUID: $0.uid, hostDeviceName: $0.name)
+        }
+    }
+
+    private func effectiveInputEndpoint() throws -> AudioEndpointConfig? {
+        if let input = audioConfig.input {
+            return input
+        }
+        return try audioDeviceEnumerator.defaultInputDevice().map {
+            AudioEndpointConfig(hostDeviceUID: $0.uid, hostDeviceName: $0.name)
+        }
     }
 
     /// Start the AudioRouter for this stream.

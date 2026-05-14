@@ -88,7 +88,10 @@ let package = Package(
         .target(
             name: "VortexDevices",
             dependencies: ["VortexCore", "VortexHV", "VortexAudio"],
-            path: "Sources/VortexDevices"
+            path: "Sources/VortexDevices",
+            linkerSettings: [
+                .linkedFramework("vmnet"),
+            ]
         ),
         .testTarget(
             name: "VortexDevicesTests",
@@ -167,14 +170,14 @@ let package = Package(
         // MARK: - Native Linux backend
         .target(
             name: "VortexLinux",
-            dependencies: ["VortexCore", "VortexHV", "VortexDevices"],
+            dependencies: ["VortexCore", "VortexHV", "VortexDevices", "VortexAudio"],
             path: "Sources/VortexLinux"
         ),
 
         // MARK: - VM owner service and local control plane
         .target(
             name: "VortexService",
-            dependencies: ["VortexCore", "VortexAudio", "VortexPersistence", "VortexVZ"],
+            dependencies: ["VortexCore", "VortexAudio", "VortexPersistence", "VortexVZ", "VortexHV", "VortexLinux"],
             path: "Sources/VortexService",
             linkerSettings: [
                 .linkedFramework("Virtualization"),
@@ -226,6 +229,7 @@ let package = Package(
             dependencies: [
                 "VortexCore",
                 "VortexAudio",
+                "VortexLinux",
                 "VortexPersistence",
                 "VortexService",
                 "VortexVZ",

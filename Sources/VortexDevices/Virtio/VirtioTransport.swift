@@ -139,6 +139,9 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
     /// MSI controller for interrupt delivery.
     private let msiController: MSIController?
 
+    /// Callback for legacy INTx delivery when the guest has not enabled MSI-X.
+    public var onINTxLevelChanged: (@Sendable (Bool) -> Void)?
+
     /// BAR0 layout computed from device parameters.
     private let bar0Layout: VirtioBar0Layout
 
@@ -410,7 +413,9 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
         }
 
         if offset >= layout.isrOffset && offset < layout.isrOffset + layout.isrSize {
-            return UInt64(device.readAndClearISR())
+            let value = device.readAndClearISR()
+            onINTxLevelChanged?(false)
+            return UInt64(value)
         }
 
         if offset >= layout.deviceCfgOffset && offset < layout.deviceCfgOffset + layout.deviceCfgSize {
@@ -513,7 +518,8 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
     private func deliverInterrupt(queueIndex: Int, msixVector: UInt16) {
         guard msixEnabled else {
             // Legacy INTx path: ISR status is already set by the device.
-            // The PCI host bridge / GIC will pick it up via the interrupt pin.
+            // Assert the PCI interrupt line until the guest reads the ISR.
+            onINTxLevelChanged?(true)
             return
         }
 

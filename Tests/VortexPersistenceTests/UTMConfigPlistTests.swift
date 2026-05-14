@@ -63,4 +63,52 @@ struct UTMConfigPlistTests {
         #expect(decoded.auxiliaryStorageRelativePath == "Data/AuxiliaryStorage")
         #expect(!decoded.isMacOS)
     }
+
+    @Test("Decodes QEMU AArch64 UEFI Linux configuration")
+    func decodesQEMUAArch64UEFIConfiguration() throws {
+        let plist: [String: Any] = [
+            "Backend": "QEMU",
+            "Information": [
+                "Name": "Debian13Xfce",
+            ],
+            "Drive": [
+                [
+                    "Identifier": "322E7D2C-D20D-4149-9CC1-E47827E88702",
+                    "ImageName": "322E7D2C-D20D-4149-9CC1-E47827E88702.qcow2",
+                    "ImageType": "Disk",
+                    "Interface": "VirtIO",
+                    "ReadOnly": false,
+                ],
+            ],
+            "QEMU": [
+                "UEFIBoot": true,
+            ],
+            "System": [
+                "Architecture": "aarch64",
+                "CPUCount": 7,
+                "MemorySize": 8192,
+                "Target": "virt",
+                "Boot": [
+                    "EfiVariableStoragePath": "efi_vars.fd",
+                    "OperatingSystem": "Linux",
+                ],
+            ],
+        ]
+
+        let data = try PropertyListSerialization.data(
+            fromPropertyList: plist,
+            format: .xml,
+            options: 0
+        )
+
+        let decoded = try PropertyListDecoder().decode(UTMConfigPlist.self, from: data)
+
+        #expect(decoded.isQEMUAArch64Linux)
+        #expect(decoded.isQEMUUEFIBoot)
+        #expect(decoded.information?.name == "Debian13Xfce")
+        #expect(decoded.system?.cpuCount == 7)
+        #expect(decoded.system?.memorySize == 8192)
+        #expect(decoded.efiVariableStorageRelativePath == "efi_vars.fd")
+        #expect(decoded.drive(imageName: "322E7D2C-D20D-4149-9CC1-E47827E88702.qcow2")?.interface == "VirtIO")
+    }
 }

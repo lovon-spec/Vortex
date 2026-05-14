@@ -34,6 +34,7 @@ public final class VCPUThread: @unchecked Sendable {
     private var vcpuHandle: hv_vcpu_t = 0
     private let cancelledFlag = AtomicFlag()
     private let pausedFlag = AtomicFlag()
+    private let runningFlag = AtomicFlag()
     private let pauseSemaphore = DispatchSemaphore(value: 0)
     private let resumeSemaphore = DispatchSemaphore(value: 0)
     private let startedSemaphore = DispatchSemaphore(value: 0)
@@ -47,6 +48,10 @@ public final class VCPUThread: @unchecked Sendable {
     /// Start the vCPU thread. Blocks until the vCPU is created.
     /// Throws if vCPU creation fails.
     public func start() throws {
+        guard !runningFlag.load() else {
+            throw VCPUError.alreadyStarted(index: index)
+        }
+
         cancelledFlag.clear()
         pausedFlag.clear()
         startError = 0 // HV_SUCCESS
@@ -62,8 +67,10 @@ public final class VCPUThread: @unchecked Sendable {
         // Wait for the vCPU to be created on the thread.
         startedSemaphore.wait()
         if startError != HV_SUCCESS {
+            runningFlag.clear()
             throw VCPUError.createFailed(index: index, code: startError)
         }
+        runningFlag.set()
     }
 
     /// Request the vCPU to stop. Non-blocking -- the run loop will exit
@@ -102,6 +109,9 @@ public final class VCPUThread: @unchecked Sendable {
 
     /// The raw Hypervisor.framework vCPU handle. Only valid while running.
     public var handle: hv_vcpu_t { vcpuHandle }
+
+    /// Whether this thread currently owns a live vCPU.
+    public var isRunning: Bool { runningFlag.load() }
 
     // MARK: - Run Loop
 
@@ -175,6 +185,7 @@ public final class VCPUThread: @unchecked Sendable {
         onVCPUStopped?(vcpu)
         _ = hv_vcpu_destroy(vcpu)
         vcpuHandle = 0
+        runningFlag.clear()
     }
 
     // MARK: - Register Access (must be called from vcpu thread or when paused)
@@ -293,10 +304,13 @@ internal final class AtomicFlag: @unchecked Sendable {
 // MARK: - Errors
 
 public enum VCPUError: Error, CustomStringConvertible {
+    case alreadyStarted(index: Int)
     case createFailed(index: Int, code: hv_return_t)
 
     public var description: String {
         switch self {
+        case .alreadyStarted(let index):
+            return "vCPU \(index) is already running"
         case .createFailed(let index, let code):
             return "Failed to create vCPU \(index): error \(code)"
         }
