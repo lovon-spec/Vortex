@@ -20,7 +20,22 @@ let package = Package(
         .testTarget(
             name: "VortexCoreTests",
             dependencies: ["VortexCore"],
-            path: "Tests/VortexCoreTests"
+            path: "Tests/VortexCoreTests",
+            swiftSettings: [
+                .unsafeFlags([
+                    "-F", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+                ]),
+            ],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-F", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+                    "-framework", "Testing",
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/usr/lib",
+                ]),
+            ]
         ),
 
         // MARK: - Hypervisor VMM
@@ -96,17 +111,29 @@ let package = Package(
         .testTarget(
             name: "VortexDevicesTests",
             dependencies: ["VortexDevices"],
-            path: "Tests/VortexDevicesTests"
+            path: "Tests/VortexDevicesTests",
+            swiftSettings: [
+                .unsafeFlags([
+                    "-F", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+                ]),
+            ],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-F", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+                    "-framework", "Testing",
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/usr/lib",
+                ]),
+            ]
         ),
 
         // MARK: - Boot / firmware
         .target(
             name: "VortexBoot",
             dependencies: ["VortexCore", "VortexHV"],
-            path: "Sources/VortexBoot",
-            resources: [
-                .copy("UEFI/Resources"),
-            ]
+            path: "Sources/VortexBoot"
         ),
 
         // MARK: - Persistence
