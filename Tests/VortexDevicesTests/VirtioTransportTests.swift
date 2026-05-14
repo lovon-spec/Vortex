@@ -122,6 +122,28 @@ final class VirtioTransportTests: XCTestCase {
         XCTAssertEqual(transport.readBAR(bar: Self.configBAR, offset: UInt64(layout.isrOffset), size: 4), 0)
     }
 
+    func testDeviceResetDeassertsLegacyINTx() {
+        let device = TestVirtioDevice(type: .block)
+        let transport = VirtioTransport(device: device)
+        transport.attachGuestMemory(MockGuestMemory())
+
+        var levels: [Bool] = []
+        transport.onINTxLevelChanged = { levels.append($0) }
+
+        device.signalConfigChange()
+        XCTAssertEqual(levels.last, true)
+
+        transport.writeBAR(
+            bar: Self.configBAR,
+            offset: UInt64(VirtioCommonCfgOffset.deviceStatus),
+            size: 1,
+            value: 0
+        )
+
+        XCTAssertEqual(levels.last, false)
+        XCTAssertEqual(device.readISRStatus(), 0)
+    }
+
     // MARK: - Config BAR Device Config
 
     func testConfigBarDeviceConfig() {

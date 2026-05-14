@@ -431,6 +431,9 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
         if offset >= layout.commonCfgOffset && offset < layout.commonCfgOffset + layout.commonCfgSize {
             let reg = offset - layout.commonCfgOffset
             device.writeCommonConfig(offset: reg, size: size, value: UInt32(truncatingIfNeeded: value))
+            if reg == VirtioCommonCfgOffset.deviceStatus && UInt8(truncatingIfNeeded: value) == 0 {
+                onINTxLevelChanged?(false)
+            }
             return
         }
 
