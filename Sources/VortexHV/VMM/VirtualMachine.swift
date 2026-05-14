@@ -361,7 +361,7 @@ public final class VirtualMachine: @unchecked Sendable {
         _ = hv_vcpu_get_reg(vcpu, HV_REG_X2, &x2)
         _ = hv_vcpu_get_reg(vcpu, HV_REG_X3, &x3)
         let functionID = UInt32(truncatingIfNeeded: x0)
-        tracePSCICall(functionID: functionID, x1: x1, x2: x2, x3: x3)
+        tracePSCICall(vcpu: vcpu, functionID: functionID, x1: x1, x2: x2, x3: x3)
 
         switch functionID {
         case 0x8000_0000: // SMCCC_VERSION
@@ -495,10 +495,13 @@ public final class VirtualMachine: @unchecked Sendable {
         }
     }
 
-    private func tracePSCICall(functionID: UInt32, x1: UInt64, x2: UInt64, x3: UInt64) {
+    private func tracePSCICall(vcpu: hv_vcpu_t, functionID: UInt32, x1: UInt64, x2: UInt64, x3: UInt64) {
         guard tracePSCI else { return }
+        var pc: UInt64 = 0
+        _ = hv_vcpu_get_reg(vcpu, HV_REG_PC, &pc)
         let line = String(
-            format: "[psci] fn=0x%08x x1=0x%llx x2=0x%llx x3=0x%llx\n",
+            format: "[psci] pc=0x%llx fn=0x%08x x1=0x%llx x2=0x%llx x3=0x%llx\n",
+            pc,
             functionID,
             x1,
             x2,
