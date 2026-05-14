@@ -141,6 +141,11 @@ public final class VCPUExitHandler: @unchecked Sendable {
         case ESR.ecSysRegTrap:
             return handleSysRegTrap(vcpu: vcpu, syndrome: syndrome)
 
+        case ESR.ecInstrAbort:
+            let pc = getRegister(vcpu: vcpu, reg: HV_REG_PC)
+            VortexLog.hv.error("Instruction abort at PC=0x\(String(pc, radix: 16), privacy: .public), ESR=0x\(String(syndrome, radix: 16), privacy: .public), IPA=0x\(String(exit.exception.physical_address, radix: 16), privacy: .public)")
+            return false
+
         default:
             // Unhandled exception class -- log and stop.
             let pc = getRegister(vcpu: vcpu, reg: HV_REG_PC)
