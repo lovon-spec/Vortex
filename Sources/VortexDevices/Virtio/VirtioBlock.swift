@@ -29,6 +29,7 @@ public final class VirtioBlockDevice: VirtioDeviceBase, @unchecked Sendable {
     private let backend: any BlockStorageBackend
     private let serial: String
     private let blockSize: UInt32
+    private let queueLock = NSLock()
 
     public init(
         backend: any BlockStorageBackend,
@@ -54,6 +55,9 @@ public final class VirtioBlockDevice: VirtioDeviceBase, @unchecked Sendable {
 
     public override func handleQueueNotification(queueIndex: Int) {
         guard queueIndex == 0, queueIndex < queues.count else { return }
+        queueLock.lock()
+        defer { queueLock.unlock() }
+
         let queue = queues[queueIndex]
 
         while let chain = queue.nextAvailableChain() {
@@ -76,6 +80,8 @@ public final class VirtioBlockDevice: VirtioDeviceBase, @unchecked Sendable {
     }
 
     public override func deviceReset() {
+        queueLock.lock()
+        defer { queueLock.unlock() }
         try? backend.flush()
     }
 

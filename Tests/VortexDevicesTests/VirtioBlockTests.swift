@@ -8,11 +8,14 @@ import XCTest
 
 private final class InMemoryBlockStorageBackend: BlockStorageBackend, @unchecked Sendable {
     private var bytes: Data
+    private let lock = NSLock()
     let isReadOnly: Bool
     private(set) var flushCount = 0
     private(set) var isClosed = false
 
     var capacityBytes: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
         UInt64(bytes.count)
     }
 
@@ -23,16 +26,22 @@ private final class InMemoryBlockStorageBackend: BlockStorageBackend, @unchecked
 
     func read(offset: UInt64, length: Int) throws -> Data {
         try validate(offset: offset, length: UInt64(length))
+        lock.lock()
+        defer { lock.unlock() }
         return bytes.subdata(in: Int(offset)..<Int(offset) + length)
     }
 
     func write(offset: UInt64, data: Data) throws {
         guard !isReadOnly else { throw BlockStorageError.readOnly }
         try validate(offset: offset, length: UInt64(data.count))
+        lock.lock()
+        defer { lock.unlock() }
         bytes.replaceSubrange(Int(offset)..<Int(offset) + data.count, with: data)
     }
 
     func flush() {
+        lock.lock()
+        defer { lock.unlock() }
         flushCount += 1
     }
 
@@ -41,6 +50,8 @@ private final class InMemoryBlockStorageBackend: BlockStorageBackend, @unchecked
     }
 
     func snapshot(offset: Int, length: Int) -> Data {
+        lock.lock()
+        defer { lock.unlock() }
         bytes.subdata(in: offset..<offset + length)
     }
 
@@ -133,12 +144,57 @@ final class VirtioBlockTests: XCTestCase {
         XCTAssertEqual(memory.read(at: statusGPA, size: 1).first, 0)
     }
 
+    func testConcurrentNotificationsProcessBlockQueueOnce() {
+        let requestCount = 8
+        let sectorSize = Int(vortexBlockSectorSize)
+        var backing = Data(count: requestCount * sectorSize)
+        for sector in 0..<requestCount {
+            let payload = Data(repeating: UInt8(0xA0 + sector), count: sectorSize)
+            backing.replaceSubrange(sector * sectorSize..<(sector + 1) * sectorSize, with: payload)
+        }
+
+        let backend = InMemoryBlockStorageBackend(bytes: backing)
+        let (device, memory, layout) = makeConfiguredBlockDevice(backend: backend, queueSize: 64)
+        var statusGPAs: [UInt64] = []
+        var dataGPAs: [UInt64] = []
+
+        for request in 0..<requestCount {
+            let head = UInt16(request * 3)
+            let headerGPA = baseGPA + 0x50_000 + UInt64(request) * 0x3000
+            let dataGPA = headerGPA + 0x1000
+            let statusGPA = headerGPA + 0x2000
+
+            memory.write(at: headerGPA, data: requestHeader(type: 0, sector: UInt64(request)))
+            writeDescriptor(memory: memory, layout: layout, index: head, addr: headerGPA, len: 16, flags: .next, next: head + 1)
+            writeDescriptor(memory: memory, layout: layout, index: head + 1, addr: dataGPA, len: UInt32(sectorSize), flags: [.next, .write], next: head + 2)
+            writeDescriptor(memory: memory, layout: layout, index: head + 2, addr: statusGPA, len: 1, flags: .write, next: 0)
+            postAvailable(memory: memory, layout: layout, ringSlot: UInt16(request), headIndex: head, newAvailIdx: UInt16(request + 1))
+
+            dataGPAs.append(dataGPA)
+            statusGPAs.append(statusGPA)
+        }
+
+        DispatchQueue.concurrentPerform(iterations: requestCount) { _ in
+            device.processNotification(queueIndex: 0)
+        }
+
+        XCTAssertEqual(memory.directReadUInt16(at: layout.usedRingMemOffset + 2), UInt16(requestCount))
+        for request in 0..<requestCount {
+            XCTAssertEqual(memory.read(at: statusGPAs[request], size: 1).first, 0)
+            XCTAssertEqual(
+                memory.read(at: dataGPAs[request], size: sectorSize),
+                Data(repeating: UInt8(0xA0 + request), count: sectorSize)
+            )
+        }
+    }
+
     private func makeConfiguredBlockDevice(
         backend: InMemoryBlockStorageBackend,
-        serial: String = "VORTEX-TEST"
+        serial: String = "VORTEX-TEST",
+        queueSize: UInt16 = 16
     ) -> (VirtioBlockDevice, MockGuestMemory, TestQueueLayout) {
         let memory = MockGuestMemory(baseGPA: baseGPA, size: 1024 * 1024)
-        let layout = TestQueueLayout(queueSize: 16, baseOffset: 0, baseGPA: baseGPA)
+        let layout = TestQueueLayout(queueSize: queueSize, baseOffset: 0, baseGPA: baseGPA)
         let device = VirtioBlockDevice(backend: backend, serial: serial)
 
         device.attachGuestMemory(memory)
