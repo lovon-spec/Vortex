@@ -407,10 +407,10 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
             return readCFIData(bank, offset: offset, size: size)
 
         case .readStatus, .programming, .eraseSetup:
-            return UInt64(bank.status)
+            return replicateFlashByte(bank.status, offset: offset, size: size)
 
         case .readID:
-            return readIDData(bank, offset: offset)
+            return readIDData(bank, offset: offset, size: size)
         }
     }
 
@@ -431,19 +431,27 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
 
     /// Read CFI query structure data.
     private func readCFIData(_ bank: FlashBank, offset: Int, size: Int) -> UInt64 {
-        // CFI data is word-addressed. Convert byte offset to word index.
-        let wordIndex = offset / 2
-        guard wordIndex < bank.cfiData.count else {
-            return 0
+        var result: UInt64 = 0
+        for laneOffset in stride(from: 0, to: size, by: 2) {
+            // CFI data is word-addressed on the emulated 16-bit flash lanes.
+            let wordIndex = (offset + laneOffset) / 2
+            guard wordIndex < bank.cfiData.count else { continue }
+            result |= UInt64(bank.cfiData[wordIndex]) << (laneOffset * 8)
         }
-        return UInt64(bank.cfiData[wordIndex])
+        return result
     }
 
     /// Read electronic signature / device ID.
-    private func readIDData(_ bank: FlashBank, offset: Int) -> UInt64 {
-        // Word address 0: Manufacturer code (Intel = 0x89)
-        // Word address 1: Device code
-        let wordIndex = offset / 2
+    private func readIDData(_ bank: FlashBank, offset: Int, size: Int) -> UInt64 {
+        var result: UInt64 = 0
+        for laneOffset in stride(from: 0, to: size, by: 2) {
+            let wordIndex = (offset + laneOffset) / 2
+            result |= UInt64(idByte(wordIndex: wordIndex)) << (laneOffset * 8)
+        }
+        return result
+    }
+
+    private func idByte(wordIndex: Int) -> UInt8 {
         switch wordIndex {
         case 0:
             return 0x89 // Intel manufacturer code
@@ -454,6 +462,14 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
         default:
             return 0
         }
+    }
+
+    private func replicateFlashByte(_ value: UInt8, offset: Int, size: Int) -> UInt64 {
+        var result: UInt64 = 0
+        for laneOffset in stride(from: 0, to: size, by: 2) {
+            result |= UInt64(value) << (laneOffset * 8)
+        }
+        return result
     }
 
     // MARK: - Private: Write Logic (Command Handling)
