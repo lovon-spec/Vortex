@@ -84,6 +84,9 @@ struct StartLinuxHVCommand: ParsableCommand {
     @Option(help: "Network mode: nat or none.")
     var network: LinuxHVNetworkArgument = .nat
 
+    @Option(help: "Optional path to write the latest native framebuffer as a binary PPM image.")
+    var framebufferDump: String?
+
     func run() throws {
         let diskSize: UInt64
         if disk.hasPrefix("ssh://") {
@@ -123,6 +126,16 @@ struct StartLinuxHVCommand: ParsableCommand {
         let vm = try NativeLinuxVM(configuration: config)
         vm.onSerialOutput = { byte in
             FileHandle.standardOutput.write(Data([byte]))
+        }
+        if let framebufferDump {
+            vm.onFramebufferUpdated = { framebuffer in
+                do {
+                    try Self.writeFramebufferDump(framebuffer, to: framebufferDump)
+                } catch {
+                    let message = "Failed to write framebuffer dump: \(error)\n"
+                    FileHandle.standardError.write(Data(message.utf8))
+                }
+            }
         }
 
         print("Starting native VortexHV Linux VM...")
@@ -172,6 +185,31 @@ struct StartLinuxHVCommand: ParsableCommand {
         if let lifecycleError {
             throw RuntimeError(lifecycleError)
         }
+    }
+
+    private static func writeFramebufferDump(
+        _ framebuffer: NativeLinuxFramebuffer,
+        to path: String
+    ) throws {
+        let pixelCount = framebuffer.width * framebuffer.height
+        let expectedBytes = pixelCount * 4
+        guard framebuffer.width > 0,
+              framebuffer.height > 0,
+              framebuffer.data.count >= expectedBytes else {
+            return
+        }
+
+        var imageData = Data("P6\n\(framebuffer.width) \(framebuffer.height)\n255\n".utf8)
+        imageData.reserveCapacity(imageData.count + pixelCount * 3)
+
+        let pixels = framebuffer.data.prefix(expectedBytes)
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            imageData.append(pixels[offset + 2])
+            imageData.append(pixels[offset + 1])
+            imageData.append(pixels[offset])
+        }
+
+        try imageData.write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 
     private func makeBootConfig(mode: LinuxHVBootModeArgument) throws -> BootConfig {
