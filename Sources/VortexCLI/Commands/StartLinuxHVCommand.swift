@@ -192,7 +192,8 @@ struct StartLinuxHVCommand: ParsableCommand {
                     let reason = snapshot.lastExitReason.map(String.init) ?? "none"
                     let forceExit = snapshot.lastForceExitReturn.map(String.init) ?? "none"
                     let liveRead = snapshot.lastLiveRegisterReadReturn.map(String.init) ?? "none"
-                    print("[diag] vCPU \(snapshot.index) running=\(snapshot.isRunning) pc=0x\(String(snapshot.lastPC, radix: 16)) exit=\(reason) exits=\(snapshot.exitCount) forceExit=\(forceExit) liveRead=\(liveRead)")
+                    let registers = snapshot.registers
+                    print("[diag] vCPU \(snapshot.index) running=\(snapshot.isRunning) pc=0x\(String(snapshot.lastPC, radix: 16)) exit=\(reason) exits=\(snapshot.exitCount) forceExit=\(forceExit) liveRead=\(liveRead) x0=0x\(String(registers.x0, radix: 16)) x1=0x\(String(registers.x1, radix: 16)) x19=0x\(String(registers.x19, radix: 16)) x29=0x\(String(registers.x29, radix: 16)) x30=0x\(String(registers.x30, radix: 16)) sp1=0x\(String(registers.spEL1, radix: 16)) cpsr=0x\(String(registers.cpsr, radix: 16))")
                 }
             }
             timer.resume()

@@ -46,6 +46,7 @@ public final class VCPUThread: @unchecked Sendable {
     private var exitCount: UInt64 = 0
     private var lastForceExitReturn: hv_return_t?
     private var lastLiveRegisterReadReturn: hv_return_t?
+    private var lastRegisters = RegisterSnapshot.zero
 
     public init(index: Int, exitHandler: VCPUExitHandler) {
         self.index = index
@@ -126,6 +127,33 @@ public final class VCPUThread: @unchecked Sendable {
         public let exitCount: UInt64
         public let lastForceExitReturn: hv_return_t?
         public let lastLiveRegisterReadReturn: hv_return_t?
+        public let registers: RegisterSnapshot
+    }
+
+    public struct RegisterSnapshot: Sendable {
+        public let x0: UInt64
+        public let x1: UInt64
+        public let x2: UInt64
+        public let x3: UInt64
+        public let x19: UInt64
+        public let x29: UInt64
+        public let x30: UInt64
+        public let spEL0: UInt64
+        public let spEL1: UInt64
+        public let cpsr: UInt64
+
+        public static let zero = RegisterSnapshot(
+            x0: 0,
+            x1: 0,
+            x2: 0,
+            x3: 0,
+            x19: 0,
+            x29: 0,
+            x30: 0,
+            spEL0: 0,
+            spEL1: 0,
+            cpsr: 0
+        )
     }
 
     public func diagnostics(forceExit: Bool = false) -> Diagnostics {
@@ -239,8 +267,10 @@ public final class VCPUThread: @unchecked Sendable {
     ) {
         var pc: UInt64 = 0
         _ = hv_vcpu_get_reg(vcpu, HV_REG_PC, &pc)
+        let registers = readRegisterSnapshot(vcpu: vcpu)
         diagnosticsLock.lock()
         lastPC = pc
+        lastRegisters = registers
         lastExitReason = exitReason
         if incrementsExitCount {
             exitCount &+= 1
@@ -285,7 +315,8 @@ public final class VCPUThread: @unchecked Sendable {
             lastExitReason: lastExitReason,
             exitCount: exitCount,
             lastForceExitReturn: lastForceExitReturn,
-            lastLiveRegisterReadReturn: lastLiveRegisterReadReturn
+            lastLiveRegisterReadReturn: lastLiveRegisterReadReturn,
+            registers: lastRegisters
         )
         diagnosticsLock.unlock()
         return snapshot
@@ -306,6 +337,38 @@ public final class VCPUThread: @unchecked Sendable {
             lastPC = pc
         }
         diagnosticsLock.unlock()
+    }
+
+    private func readRegisterSnapshot(vcpu: hv_vcpu_t) -> RegisterSnapshot {
+        RegisterSnapshot(
+            x0: readGPR(vcpu: vcpu, index: 0),
+            x1: readGPR(vcpu: vcpu, index: 1),
+            x2: readGPR(vcpu: vcpu, index: 2),
+            x3: readGPR(vcpu: vcpu, index: 3),
+            x19: readGPR(vcpu: vcpu, index: 19),
+            x29: readGPR(vcpu: vcpu, index: 29),
+            x30: readGPR(vcpu: vcpu, index: 30),
+            spEL0: readSysReg(vcpu: vcpu, reg: HV_SYS_REG_SP_EL0),
+            spEL1: readSysReg(vcpu: vcpu, reg: HV_SYS_REG_SP_EL1),
+            cpsr: readReg(vcpu: vcpu, reg: HV_REG_CPSR)
+        )
+    }
+
+    private func readGPR(vcpu: hv_vcpu_t, index: Int) -> UInt64 {
+        let reg = hv_reg_t(rawValue: HV_REG_X0.rawValue + UInt32(index))
+        return readReg(vcpu: vcpu, reg: reg)
+    }
+
+    private func readReg(vcpu: hv_vcpu_t, reg: hv_reg_t) -> UInt64 {
+        var value: UInt64 = 0
+        _ = hv_vcpu_get_reg(vcpu, reg, &value)
+        return value
+    }
+
+    private func readSysReg(vcpu: hv_vcpu_t, reg: hv_sys_reg_t) -> UInt64 {
+        var value: UInt64 = 0
+        _ = hv_vcpu_get_sys_reg(vcpu, reg, &value)
+        return value
     }
 
     private func waitForDiagnosticExit(after initialCount: UInt64) {
