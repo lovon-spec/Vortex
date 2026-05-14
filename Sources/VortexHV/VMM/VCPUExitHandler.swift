@@ -144,7 +144,7 @@ public final class VCPUExitHandler: @unchecked Sendable {
         default:
             // Unhandled exception class -- log and stop.
             let pc = getRegister(vcpu: vcpu, reg: HV_REG_PC)
-            VortexLog.hv.error("Unhandled exception class 0x\(String(ec, radix: 16)) at PC=0x\(String(pc, radix: 16)), ESR=0x\(String(syndrome, radix: 16))")
+            VortexLog.hv.error("Unhandled exception class 0x\(String(ec, radix: 16), privacy: .public) at PC=0x\(String(pc, radix: 16), privacy: .public), ESR=0x\(String(syndrome, radix: 16), privacy: .public)")
             return false
         }
     }
