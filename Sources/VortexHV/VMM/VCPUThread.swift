@@ -86,7 +86,7 @@ public final class VCPUThread: @unchecked Sendable {
             resumeSemaphore.signal()
         }
         // Force exit the vCPU if it is running.
-        let handle = vcpuHandle
+        let handle = currentHandle()
         if handle != 0 {
             var vcpus = [handle]
             _ = hv_vcpus_exit(&vcpus, 1)
@@ -96,7 +96,7 @@ public final class VCPUThread: @unchecked Sendable {
     /// Pause the vCPU. The run loop will block at the next iteration.
     public func pause() {
         pausedFlag.set()
-        let handle = vcpuHandle
+        let handle = currentHandle()
         if handle != 0 {
             var vcpus = [handle]
             _ = hv_vcpus_exit(&vcpus, 1)
@@ -112,7 +112,7 @@ public final class VCPUThread: @unchecked Sendable {
     }
 
     /// The raw Hypervisor.framework vCPU handle. Only valid while running.
-    public var handle: hv_vcpu_t { vcpuHandle }
+    public var handle: hv_vcpu_t { currentHandle() }
 
     /// Whether this thread currently owns a live vCPU.
     public var isRunning: Bool { runningFlag.load() }
@@ -126,25 +126,22 @@ public final class VCPUThread: @unchecked Sendable {
     }
 
     public func diagnostics(forceExit: Bool = false) -> Diagnostics {
+        let initialCount: UInt64
+        let handle: hv_vcpu_t
+        diagnosticsLock.lock()
+        handle = vcpuHandle
+        initialCount = exitCount
+        diagnosticsLock.unlock()
+
         if forceExit {
-            let handle = vcpuHandle
             if handle != 0 {
                 var vcpus = [handle]
                 _ = hv_vcpus_exit(&vcpus, 1)
-                Thread.sleep(forTimeInterval: 0.005)
+                waitForDiagnosticExit(after: initialCount)
             }
         }
 
-        diagnosticsLock.lock()
-        let snapshot = Diagnostics(
-            index: index,
-            isRunning: isRunning,
-            lastPC: lastPC,
-            lastExitReason: lastExitReason,
-            exitCount: exitCount
-        )
-        diagnosticsLock.unlock()
-        return snapshot
+        return diagnosticSnapshot()
     }
 
     // MARK: - Run Loop
@@ -159,18 +156,19 @@ public final class VCPUThread: @unchecked Sendable {
             startedSemaphore.signal()
             return
         }
-        vcpuHandle = vcpu
+        setCurrentHandle(vcpu)
 
         // Signal that creation succeeded.
         startedSemaphore.signal()
 
         // Set up initial state via callback.
         onVCPUCreated?(vcpu)
+        recordState(vcpu: vcpu, exitReason: nil, incrementsExitCount: false)
 
         guard let exitPtr = exitInfo else {
             VortexLog.hv.error("VCPU \(self.index): exit info pointer is nil after creation")
             _ = hv_vcpu_destroy(vcpu)
-            vcpuHandle = 0
+            setCurrentHandle(0)
             return
         }
 
@@ -219,18 +217,67 @@ public final class VCPUThread: @unchecked Sendable {
         // Notify and destroy.
         onVCPUStopped?(vcpu)
         _ = hv_vcpu_destroy(vcpu)
-        vcpuHandle = 0
+        setCurrentHandle(0)
         runningFlag.clear()
     }
 
     private func record(exit: hv_vcpu_exit_t, vcpu: hv_vcpu_t) {
+        recordState(vcpu: vcpu, exitReason: exit.reason.rawValue, incrementsExitCount: true)
+    }
+
+    private func recordState(
+        vcpu: hv_vcpu_t,
+        exitReason: UInt32?,
+        incrementsExitCount: Bool
+    ) {
         var pc: UInt64 = 0
         _ = hv_vcpu_get_reg(vcpu, HV_REG_PC, &pc)
         diagnosticsLock.lock()
         lastPC = pc
-        lastExitReason = exit.reason.rawValue
-        exitCount &+= 1
+        lastExitReason = exitReason
+        if incrementsExitCount {
+            exitCount &+= 1
+        }
         diagnosticsLock.unlock()
+    }
+
+    private func currentHandle() -> hv_vcpu_t {
+        diagnosticsLock.lock()
+        let handle = vcpuHandle
+        diagnosticsLock.unlock()
+        return handle
+    }
+
+    private func setCurrentHandle(_ handle: hv_vcpu_t) {
+        diagnosticsLock.lock()
+        vcpuHandle = handle
+        diagnosticsLock.unlock()
+    }
+
+    private func diagnosticSnapshot() -> Diagnostics {
+        diagnosticsLock.lock()
+        let snapshot = Diagnostics(
+            index: index,
+            isRunning: isRunning,
+            lastPC: lastPC,
+            lastExitReason: lastExitReason,
+            exitCount: exitCount
+        )
+        diagnosticsLock.unlock()
+        return snapshot
+    }
+
+    private func waitForDiagnosticExit(after initialCount: UInt64) {
+        let deadline = Date().addingTimeInterval(0.2)
+        while Date() < deadline {
+            diagnosticsLock.lock()
+            let didExit = exitCount != initialCount || vcpuHandle == 0
+            diagnosticsLock.unlock()
+            if didExit {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.001)
+        }
     }
 
     // MARK: - Register Access (must be called from vcpu thread or when paused)
@@ -238,25 +285,25 @@ public final class VCPUThread: @unchecked Sendable {
     /// Get a general purpose register value.
     public func getRegister(_ reg: hv_reg_t) -> UInt64 {
         var value: UInt64 = 0
-        _ = hv_vcpu_get_reg(vcpuHandle, reg, &value)
+        _ = hv_vcpu_get_reg(currentHandle(), reg, &value)
         return value
     }
 
     /// Set a general purpose register value.
     public func setRegister(_ reg: hv_reg_t, value: UInt64) {
-        _ = hv_vcpu_set_reg(vcpuHandle, reg, value)
+        _ = hv_vcpu_set_reg(currentHandle(), reg, value)
     }
 
     /// Get a system register value.
     public func getSysRegister(_ reg: hv_sys_reg_t) -> UInt64 {
         var value: UInt64 = 0
-        _ = hv_vcpu_get_sys_reg(vcpuHandle, reg, &value)
+        _ = hv_vcpu_get_sys_reg(currentHandle(), reg, &value)
         return value
     }
 
     /// Set a system register value.
     public func setSysRegister(_ reg: hv_sys_reg_t, value: UInt64) {
-        _ = hv_vcpu_set_sys_reg(vcpuHandle, reg, value)
+        _ = hv_vcpu_set_sys_reg(currentHandle(), reg, value)
     }
 
     /// Get the program counter.
@@ -268,13 +315,13 @@ public final class VCPUThread: @unchecked Sendable {
     /// Get the stack pointer (SP_EL0).
     public func getSP() -> UInt64 {
         var value: UInt64 = 0
-        _ = hv_vcpu_get_sys_reg(vcpuHandle, HV_SYS_REG_SP_EL0, &value)
+        _ = hv_vcpu_get_sys_reg(currentHandle(), HV_SYS_REG_SP_EL0, &value)
         return value
     }
 
     /// Set the stack pointer (SP_EL0).
     public func setSP(_ value: UInt64) {
-        _ = hv_vcpu_set_sys_reg(vcpuHandle, HV_SYS_REG_SP_EL0, value)
+        _ = hv_vcpu_set_sys_reg(currentHandle(), HV_SYS_REG_SP_EL0, value)
     }
 
     /// Get the current program status register.
@@ -299,31 +346,31 @@ public final class VCPUThread: @unchecked Sendable {
 
     /// Set the pending interrupt state for this vCPU.
     public func setPendingInterrupt(type: hv_interrupt_type_t, pending: Bool) {
-        _ = hv_vcpu_set_pending_interrupt(vcpuHandle, type, pending)
+        _ = hv_vcpu_set_pending_interrupt(currentHandle(), type, pending)
     }
 
     /// Get the pending interrupt state for this vCPU.
     public func getPendingInterrupt(type: hv_interrupt_type_t) -> Bool {
         var pending = false
-        _ = hv_vcpu_get_pending_interrupt(vcpuHandle, type, &pending)
+        _ = hv_vcpu_get_pending_interrupt(currentHandle(), type, &pending)
         return pending
     }
 
     /// Set the VTimer mask.
     public func setVTimerMask(_ masked: Bool) {
-        _ = hv_vcpu_set_vtimer_mask(vcpuHandle, masked)
+        _ = hv_vcpu_set_vtimer_mask(currentHandle(), masked)
     }
 
     /// Get the VTimer offset.
     public func getVTimerOffset() -> UInt64 {
         var offset: UInt64 = 0
-        _ = hv_vcpu_get_vtimer_offset(vcpuHandle, &offset)
+        _ = hv_vcpu_get_vtimer_offset(currentHandle(), &offset)
         return offset
     }
 
     /// Set the VTimer offset.
     public func setVTimerOffset(_ offset: UInt64) {
-        _ = hv_vcpu_set_vtimer_offset(vcpuHandle, offset)
+        _ = hv_vcpu_set_vtimer_offset(currentHandle(), offset)
     }
 }
 
