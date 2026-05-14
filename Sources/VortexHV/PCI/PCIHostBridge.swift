@@ -16,6 +16,26 @@
 
 import Foundation
 
+private final class PCITraceLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private let enabled = ProcessInfo.processInfo.environment["VORTEX_HV_TRACE_PCI"] == "1"
+    private var count = 0
+    private let limit = 2_000
+
+    func log(_ message: @autoclosure () -> String) {
+        guard enabled else { return }
+        lock.lock()
+        guard count < limit else {
+            lock.unlock()
+            return
+        }
+        count += 1
+        lock.unlock()
+
+        FileHandle.standardError.write(Data(("[pci] \(message())\n").utf8))
+    }
+}
+
 // MARK: - PCI Host Bridge
 
 /// Top-level PCI host bridge that connects the PCI bus to the guest address space.
@@ -53,6 +73,7 @@ public final class PCIHostBridge: MMIODevice, @unchecked Sendable {
     /// PCI MMIO window devices registered with the address space.
     private let lock = NSLock()
     private var barWindowDevices: [PCIBARWindow] = []
+    private let trace = PCITraceLog()
 
     // MARK: - Initialization
 
@@ -78,11 +99,15 @@ public final class PCIHostBridge: MMIODevice, @unchecked Sendable {
     public func mmioRead(offset: UInt64, size: Int) -> UInt64 {
         // ECAM: the offset directly encodes bus/device/function/register.
         let value = bus.readConfig(ecamOffset: offset, size: size)
+        let address = PCIAddress.decode(ecamOffset: offset)
+        trace.log("cfg read \(address) size=\(size) value=0x\(String(value, radix: 16))")
         return UInt64(value)
     }
 
     /// Handle a write to the ECAM config space region.
     public func mmioWrite(offset: UInt64, size: Int, value: UInt64) {
+        let address = PCIAddress.decode(ecamOffset: offset)
+        trace.log("cfg write \(address) size=\(size) value=0x\(String(value, radix: 16))")
         bus.writeConfig(ecamOffset: offset, size: size, value: UInt32(truncatingIfNeeded: value))
     }
 
@@ -108,12 +133,14 @@ public final class PCIHostBridge: MMIODevice, @unchecked Sendable {
             PCIBARWindow(
                 bus: bus,
                 baseAddress: MachineMemoryMap.pciMmio32Base,
-                regionSize: MachineMemoryMap.pciMmio32Size
+                regionSize: MachineMemoryMap.pciMmio32Size,
+                trace: trace
             ),
             PCIBARWindow(
                 bus: bus,
                 baseAddress: MachineMemoryMap.pciMmio64Base,
-                regionSize: MachineMemoryMap.pciMmio64Size
+                regionSize: MachineMemoryMap.pciMmio64Size,
+                trace: trace
             ),
         ]
 
@@ -148,26 +175,43 @@ public final class PCIBARWindow: MMIODevice, @unchecked Sendable {
     public let regionSize: UInt64
 
     private let bus: PCIBus
+    private let trace: PCITraceLog
 
-    init(bus: PCIBus, baseAddress: UInt64, regionSize: UInt64) {
+    fileprivate init(bus: PCIBus, baseAddress: UInt64, regionSize: UInt64, trace: PCITraceLog) {
         self.bus = bus
         self.baseAddress = baseAddress
         self.regionSize = regionSize
+        self.trace = trace
     }
 
     public func mmioRead(offset: UInt64, size: Int) -> UInt64 {
         let gpa = baseAddress + offset
         guard let (mapping, barOffset) = bus.findBARMapping(at: gpa) else {
+            trace.log("bar read miss gpa=0x\(String(gpa, radix: 16)) size=\(size)")
             return size == 8 ? UInt64.max : (UInt64(1) << UInt64(size * 8)) - 1
         }
-        return mapping.device.readBAR(bar: mapping.barIndex, offset: barOffset, size: size)
+        let value = mapping.device.readBAR(bar: mapping.barIndex, offset: barOffset, size: size)
+        trace.log(
+            "bar read dev=0x\(String(mapping.device.configSpace.vendorID, radix: 16)):" +
+            "0x\(String(mapping.device.configSpace.deviceID, radix: 16)) bar=\(mapping.barIndex) " +
+            "gpa=0x\(String(gpa, radix: 16)) off=0x\(String(barOffset, radix: 16)) " +
+            "size=\(size) value=0x\(String(value, radix: 16))"
+        )
+        return value
     }
 
     public func mmioWrite(offset: UInt64, size: Int, value: UInt64) {
         let gpa = baseAddress + offset
         guard let (mapping, barOffset) = bus.findBARMapping(at: gpa) else {
+            trace.log("bar write miss gpa=0x\(String(gpa, radix: 16)) size=\(size) value=0x\(String(value, radix: 16))")
             return
         }
+        trace.log(
+            "bar write dev=0x\(String(mapping.device.configSpace.vendorID, radix: 16)):" +
+            "0x\(String(mapping.device.configSpace.deviceID, radix: 16)) bar=\(mapping.barIndex) " +
+            "gpa=0x\(String(gpa, radix: 16)) off=0x\(String(barOffset, radix: 16)) " +
+            "size=\(size) value=0x\(String(value, radix: 16))"
+        )
         mapping.device.writeBAR(bar: mapping.barIndex, offset: barOffset, size: size, value: value)
     }
 }
