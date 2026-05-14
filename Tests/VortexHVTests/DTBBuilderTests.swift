@@ -28,6 +28,22 @@ struct DTBBuilderTests {
         #expect(stringsOffset == structOffset + structSize)
         #expect(stringsOffset + stringsSize == totalSize)
     }
+
+    @Test("Platform devices reference a real fixed clock provider")
+    func platformClockProvider() throws {
+        let dtb = DTBBuilder(cpuCount: 2, ramSize: 512 * 1024 * 1024).build()
+
+        let clockFrequency = try #require(fdtProperty(dtb, node: "clk24mhz", property: "clock-frequency"))
+        let clockPhandle = try #require(fdtProperty(dtb, node: "clk24mhz", property: "phandle"))
+        let uartClocks = try #require(fdtProperty(dtb, node: "uart@9000000", property: "clocks"))
+        let rtcClocks = try #require(fdtProperty(dtb, node: "rtc@9010000", property: "clocks"))
+
+        #expect(readBE32(clockFrequency, at: 0) == 24_000_000)
+        #expect(readBE32(clockPhandle, at: 0) == 2)
+        #expect(readBE32(uartClocks, at: 0) == 2)
+        #expect(readBE32(uartClocks, at: 4) == 2)
+        #expect(readBE32(rtcClocks, at: 0) == 2)
+    }
 }
 
 private func readBE32(_ data: Data, at offset: Int) -> UInt32 {
@@ -35,4 +51,70 @@ private func readBE32(_ data: Data, at offset: Int) -> UInt32 {
         UInt32(data[offset + 1]) << 16 |
         UInt32(data[offset + 2]) << 8 |
         UInt32(data[offset + 3])
+}
+
+private func fdtProperty(_ data: Data, node targetNode: String, property targetProperty: String) -> Data? {
+    let structOffset = Int(readBE32(data, at: 8))
+    let stringsOffset = Int(readBE32(data, at: 12))
+    let structSize = Int(readBE32(data, at: 36))
+    var offset = structOffset
+    let end = structOffset + structSize
+    var nodeStack: [String] = []
+
+    while offset + 4 <= end {
+        let token = readBE32(data, at: offset)
+        offset += 4
+
+        switch token {
+        case 0x0000_0001: // FDT_BEGIN_NODE
+            let start = offset
+            while offset < end, data[offset] != 0 {
+                offset += 1
+            }
+            let name = String(data: data[start..<offset], encoding: .utf8) ?? ""
+            offset += 1
+            offset = align4(offset)
+            nodeStack.append(name)
+
+        case 0x0000_0002: // FDT_END_NODE
+            _ = nodeStack.popLast()
+
+        case 0x0000_0003: // FDT_PROP
+            guard offset + 8 <= end else { return nil }
+            let length = Int(readBE32(data, at: offset))
+            let nameOffset = Int(readBE32(data, at: offset + 4))
+            offset += 8
+            guard offset + length <= data.count else { return nil }
+            let propertyName = fdtString(data, stringsOffset: stringsOffset, nameOffset: nameOffset)
+            let value = Data(data[offset..<offset + length])
+            offset = align4(offset + length)
+            if nodeStack.last == targetNode, propertyName == targetProperty {
+                return value
+            }
+
+        case 0x0000_0004: // FDT_NOP
+            continue
+
+        case 0x0000_0009: // FDT_END
+            return nil
+
+        default:
+            return nil
+        }
+    }
+
+    return nil
+}
+
+private func fdtString(_ data: Data, stringsOffset: Int, nameOffset: Int) -> String {
+    var offset = stringsOffset + nameOffset
+    let start = offset
+    while offset < data.count, data[offset] != 0 {
+        offset += 1
+    }
+    return String(data: data[start..<offset], encoding: .utf8) ?? ""
+}
+
+private func align4(_ value: Int) -> Int {
+    (value + 3) & ~3
 }

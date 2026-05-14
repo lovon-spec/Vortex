@@ -21,6 +21,11 @@ private let FDT_PROP: UInt32 = 0x0000_0003
 private let FDT_NOP: UInt32 = 0x0000_0004
 private let FDT_END: UInt32 = 0x0000_0009
 
+private enum DTBPhandle {
+    static let gic: UInt32 = 1
+    static let fixedClock24MHz: UInt32 = 2
+}
+
 // MARK: - DTB Builder
 
 /// Builds a Flattened Device Tree (FDT) binary for ARM64 VM boot.
@@ -125,7 +130,7 @@ public final class DTBBuilder {
         addProperty("compatible", stringList: ["linux,dummy-virt"])
         addProperty("#address-cells", u32: 2)
         addProperty("#size-cells", u32: 2)
-        addProperty("interrupt-parent", u32: 1) // phandle of GIC
+        addProperty("interrupt-parent", u32: DTBPhandle.gic) // phandle of GIC
 
         // -- chosen node --
         buildChosenNode()
@@ -141,6 +146,9 @@ public final class DTBBuilder {
 
         // -- GIC node --
         buildGICNode()
+
+        // -- Fixed platform clocks --
+        buildClockNodes()
 
         // -- UART node --
         buildUARTNode()
@@ -226,7 +234,7 @@ public final class DTBBuilder {
         addProperty("#address-cells", u32: 2)
         addProperty("#size-cells", u32: 2)
         addProperty("interrupt-controller", empty: true)
-        addProperty("phandle", u32: 1) // Referenced by interrupt-parent
+        addProperty("phandle", u32: DTBPhandle.gic) // Referenced by interrupt-parent
 
         // reg: distributor base/size, redistributor base/size
         let regData = encodeU64Array([
@@ -239,6 +247,16 @@ public final class DTBBuilder {
         endNode()
     }
 
+    private func buildClockNodes() {
+        beginNode("clk24mhz")
+        addProperty("compatible", stringList: ["fixed-clock"])
+        addProperty("#clock-cells", u32: 0)
+        addProperty("clock-frequency", u32: 24_000_000)
+        addProperty("clock-output-names", string: "clk24mhz")
+        addProperty("phandle", u32: DTBPhandle.fixedClock24MHz)
+        endNode()
+    }
+
     private func buildUARTNode() {
         beginNode("uart@\(String(uartBase, radix: 16))")
         addProperty("compatible", stringList: ["arm,pl011", "arm,primecell"])
@@ -248,8 +266,7 @@ public final class DTBBuilder {
         let interrupts: [UInt32] = [0, spiNumber, 4] // SPI, number, IRQ_TYPE_LEVEL_HIGH
         addProperty("interrupts", u32Array: interrupts)
         addProperty("clock-names", stringList: ["uartclk", "apb_pclk"])
-        // Fixed clocks: 24 MHz UART clock
-        let clocks: [UInt32] = [0x1800_0000, 0x1800_0000] // 24 MHz in Hz
+        let clocks: [UInt32] = [DTBPhandle.fixedClock24MHz, DTBPhandle.fixedClock24MHz]
         addProperty("clocks", u32Array: clocks)
         endNode()
     }
@@ -261,7 +278,7 @@ public final class DTBBuilder {
         let spiNumber = rtcIRQ - 32
         addProperty("interrupts", u32Array: [0, spiNumber, 4])
         addProperty("clock-names", stringList: ["apb_pclk"])
-        addProperty("clocks", u32Array: [0x1800_0000])
+        addProperty("clocks", u32Array: [DTBPhandle.fixedClock24MHz])
         endNode()
     }
 
@@ -334,7 +351,7 @@ public final class DTBBuilder {
                 values.append(0)
                 values.append(0)
                 values.append(UInt32(pin))
-                values.append(1) // GIC phandle
+                values.append(DTBPhandle.gic)
                 let line = UInt32((slot + pin - 1) % Int(MachineIRQ.pciIntxCount))
                 values.append(0)
                 values.append(MachineIRQ.pciIntxBase + line - 32)
