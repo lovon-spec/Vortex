@@ -167,7 +167,7 @@ public final class FWCfgDevice: MMIODevice, @unchecked Sendable {
 
         switch offset {
         case 0x08: // Selector register
-            selector = UInt16(truncatingIfNeeded: value)
+            selector = UInt16(bigEndian: UInt16(truncatingIfNeeded: value))
             dataOffset = 0
         case 0x00: // Data register (write -- used for DMA commands, not typical)
             break

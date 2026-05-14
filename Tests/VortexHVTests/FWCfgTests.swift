@@ -22,7 +22,7 @@ struct FWCfgTests {
         ]
         let selector = fwCfg.addQEMUBootOrder(paths: paths)
 
-        fwCfg.mmioWrite(offset: 0x08, size: 2, value: UInt64(selector))
+        select(selector, on: fwCfg)
         let payload = readBytes(from: fwCfg, count: paths.joined(separator: "\n").utf8.count + 2)
 
         #expect(payload == Array("/pci@i0cf8/scsi@3/disk@0,0\n/pci@i0cf8/scsi@4/disk@0,0\n\0".utf8))
@@ -35,7 +35,7 @@ struct FWCfgTests {
             FWCfgDevice.qemuPCIVirtioBlockBootPath(slot: 3),
         ])
 
-        fwCfg.mmioWrite(offset: 0x08, size: 2, value: UInt64(FWCfgKey.fileDir.rawValue))
+        select(FWCfgKey.fileDir.rawValue, on: fwCfg)
         let directory = readBytes(from: fwCfg, count: 68)
 
         #expect(directory[0..<4].elementsEqual([0, 0, 0, 1]))
@@ -49,5 +49,9 @@ struct FWCfgTests {
         (0..<count).map { _ in
             UInt8(truncatingIfNeeded: fwCfg.mmioRead(offset: 0x00, size: 1))
         }
+    }
+
+    private func select(_ selector: UInt16, on fwCfg: FWCfgDevice) {
+        fwCfg.mmioWrite(offset: 0x08, size: 2, value: UInt64(selector.bigEndian))
     }
 }
