@@ -8,18 +8,18 @@
 //   Vendor ID:  0x1AF4 (Red Hat / Virtio)
 //   Device ID:  0x1040 + device_type (modern virtio-pci)
 //   Subsystem Vendor ID: 0x1AF4
-//   Subsystem ID: device_type
+//   Subsystem ID: 0x1100 (QEMU modern virtio-pci)
 //   Revision ID: 1 (non-transitional modern device)
 //
-// BAR Layout:
-//   BAR0: Virtio capabilities (common cfg, notify, ISR, device cfg) — 32-bit memory
-//   BAR4: MSI-X table and PBA — 32-bit memory
+// BAR Layout (matching QEMU's modern virtio-pci layout):
+//   BAR1: Virtio capabilities (common cfg, notify, ISR, device cfg) -- 32-bit memory
+//   BAR4/BAR5: MSI-X table and PBA -- 64-bit prefetchable memory
 //
 // PCI Capabilities (vendor-specific type 0x09 with virtio cfg_type):
-//   1. Common Configuration:  BAR0, offset 0x000, size 0x038
-//   2. Notification:          BAR0, offset 0x038, size varies (4 * numQueues)
-//   3. ISR Status:            BAR0, offset after notify, size 0x004
-//   4. Device Config:         BAR0, offset after ISR, size varies
+//   1. Common Configuration:  BAR1, offset 0x000, size 0x038
+//   2. Notification:          BAR1, offset 0x038, size varies (4 * numQueues)
+//   3. ISR Status:            BAR1, offset after notify, size 0x004
+//   4. Device Config:         BAR1, offset after ISR, size varies
 //   5. MSI-X capability (PCI cap ID 0x11)
 //
 // MSI-X:
@@ -54,10 +54,19 @@ struct MSIXTableEntry: Sendable {
     var address: UInt64 { UInt64(addressHigh) << 32 | UInt64(addressLow) }
 }
 
-// MARK: - Virtio PCI BAR0 Layout
+// MARK: - Virtio PCI Config BAR Layout
 
-/// Describes the BAR0 layout for virtio-pci capabilities.
-struct VirtioBar0Layout: Sendable {
+private enum VirtioPCIBar {
+    static let config = 1
+    static let msix = 4
+}
+
+private enum VirtioPCIID {
+    static let modernSubsystem: UInt16 = 0x1100
+}
+
+/// Describes the config BAR layout for virtio-pci capabilities.
+struct VirtioConfigBarLayout: Sendable {
     let commonCfgOffset: Int
     let commonCfgSize: Int
     let notifyOffset: Int
@@ -87,9 +96,11 @@ struct VirtioBar0Layout: Sendable {
         self.deviceCfgOffset = self.isrOffset + self.isrSize
         self.deviceCfgSize = max(deviceCfgSize, 4)
 
-        // Total BAR0 size, rounded up to next power of 2 for PCI BAR sizing.
+        // Total BAR size, rounded up to next power of 2 for PCI BAR sizing.
+        // QEMU's modern virtio-pci devices expose a 4 KiB config BAR even
+        // though the used portion is much smaller.
         let raw = self.deviceCfgOffset + self.deviceCfgSize
-        self.totalSize = VirtioBar0Layout.nextPowerOf2(max(raw, 256))
+        self.totalSize = VirtioConfigBarLayout.nextPowerOf2(max(raw, 4096))
     }
 
     private static func nextPowerOf2(_ value: Int) -> Int {
@@ -128,7 +139,7 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
     /// Populated at init with the device's identity fields and capabilities.
     public var configSpace: PCIConfigSpace
 
-    /// BAR descriptors. BAR0 = virtio caps, BAR4 = MSI-X.
+    /// BAR descriptors. BAR1 = virtio caps, BAR4/BAR5 = MSI-X.
     public var bars: [BARInfo]
 
     // MARK: - Internal State
@@ -142,8 +153,8 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
     /// Callback for legacy INTx delivery when the guest has not enabled MSI-X.
     public var onINTxLevelChanged: (@Sendable (Bool) -> Void)?
 
-    /// BAR0 layout computed from device parameters.
-    private let bar0Layout: VirtioBar0Layout
+    /// Config BAR layout computed from device parameters.
+    private let configBarLayout: VirtioConfigBarLayout
 
     /// MSI-X table entries. Index 0..<numQueues for queues, last for config change.
     private var msixTable: [MSIXTableEntry]
@@ -190,12 +201,12 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
         // Compute PCI device ID: 0x1040 + device type ID (modern virtio-pci).
         let pciDeviceID: UInt16 = 0x1040 + device.deviceType.typeID
 
-        // Compute BAR0 layout.
-        let layout = VirtioBar0Layout(
+        // Compute config BAR layout.
+        let layout = VirtioConfigBarLayout(
             numQueues: device.numQueues,
             deviceCfgSize: device.deviceConfigSize
         )
-        self.bar0Layout = layout
+        self.configBarLayout = layout
 
         // MSI-X: one vector per queue + one for config change.
         self.msixVectorCount = device.numQueues + 1
@@ -204,13 +215,14 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
         self.msixPBA = Array(repeating: 0, count: pbaQwords)
 
         // BAR4 size: MSI-X table (16 bytes/entry) + PBA (8 bytes per 64 vectors).
+        // QEMU exposes a 16 KiB MSI-X BAR for modern virtio-pci devices.
         let tableBytes = (device.numQueues + 1) * 16
         let pbaBytes = pbaQwords * 8
-        self.bar4Size = VirtioTransport.nextPowerOf2(max(tableBytes + pbaBytes, 256))
+        self.bar4Size = VirtioTransport.nextPowerOf2(max(tableBytes + pbaBytes, 16_384))
 
         // Build PCI capabilities chain blob and record MSI-X offset within it.
         let (capsData, msixOff) = VirtioTransport.buildCapabilities(
-            bar0Layout: layout,
+            configBarLayout: layout,
             msixVectorCount: device.numQueues + 1
         )
         self.capabilitiesData = capsData
@@ -228,7 +240,7 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
             subclass: subclass,
             progIF: progIF,
             subsystemVendorID: PCIVendorID.redHat,
-            subsystemID: device.deviceType.typeID,
+            subsystemID: VirtioPCIID.modernSubsystem,
             interruptPin: 0x01,
             headerType: 0x00
         )
@@ -245,17 +257,16 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
         }
 
         // Build BAR descriptors.
-        // BAR0: 32-bit memory BAR for virtio capabilities.
-        // BARs 1-3: unused.
-        // BAR4: 32-bit memory BAR for MSI-X table + PBA.
-        // BAR5: unused.
+        // BAR1: 32-bit memory BAR for virtio capabilities.
+        // BAR4/BAR5: 64-bit prefetchable memory BAR for MSI-X table + PBA.
+        // This follows QEMU's modern virtio-pci layout.
         var barArray: [BARInfo] = []
-        barArray.append(BARInfo(index: 0, type: .memory32, size: UInt64(layout.totalSize)))
-        barArray.append(BARInfo(index: 1, type: .unused, size: 0))
+        barArray.append(BARInfo(index: 0, type: .unused, size: 0))
+        barArray.append(BARInfo(index: 1, type: .memory32, size: UInt64(layout.totalSize)))
         barArray.append(BARInfo(index: 2, type: .unused, size: 0))
         barArray.append(BARInfo(index: 3, type: .unused, size: 0))
-        barArray.append(BARInfo(index: 4, type: .memory32, size: UInt64(bar4Size)))
-        barArray.append(BARInfo(index: 5, type: .unused, size: 0))
+        barArray.append(BARInfo(index: 4, type: .memory64, size: UInt64(bar4Size), prefetchable: true))
+        barArray.append(BARInfo(index: 5, type: .memory64High, size: 0))
         self.bars = barArray
 
         // Wire up interrupt delivery from device to transport.
@@ -332,20 +343,8 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
 
         case PCIConfigOffset.bar0, PCIConfigOffset.bar1, PCIConfigOffset.bar2,
              PCIConfigOffset.bar3, PCIConfigOffset.bar4, PCIConfigOffset.bar5:
-            // BAR writes are handled by the default protocol extension's handleBARWrite.
-            // However, we don't have access to the default impl, so we perform the
-            // write to configSpace and let the PCIBus allocator handle sizing.
             let barIndex = (offset - PCIConfigOffset.bar0) / 4
-            if barIndex < bars.count && bars[barIndex].type != .unused {
-                let barInfo = bars[barIndex]
-                if value == 0xFFFF_FFFF {
-                    // BAR sizing probe.
-                    let sizeMask = ~(UInt32(truncatingIfNeeded: barInfo.size) - 1) & 0xFFFF_FFF0
-                    configSpace.setBarValue(at: barIndex, value: sizeMask)
-                } else {
-                    configSpace.setBarValue(at: barIndex, value: value & 0xFFFF_FFF0)
-                }
-            }
+            handleBARConfigWrite(barIndex: barIndex, value: value)
             return
 
         default:
@@ -365,14 +364,14 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
 
     /// Read from a BAR MMIO region.
     ///
-    /// BAR0 contains the virtio common config, notification, ISR, and device config regions.
+    /// BAR1 contains the virtio common config, notification, ISR, and device config regions.
     /// BAR4 contains the MSI-X table and PBA.
     public func readBAR(bar: Int, offset: UInt64, size: Int) -> UInt64 {
         let off = Int(offset)
         switch bar {
-        case 0:
-            return readBar0(offset: off, size: size)
-        case 4:
+        case VirtioPCIBar.config:
+            return readConfigBar(offset: off, size: size)
+        case VirtioPCIBar.msix:
             return readBar4MSIX(offset: off, size: size)
         default:
             return 0
@@ -383,9 +382,9 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
     public func writeBAR(bar: Int, offset: UInt64, size: Int, value: UInt64) {
         let off = Int(offset)
         switch bar {
-        case 0:
-            writeBar0(offset: off, size: size, value: value)
-        case 4:
+        case VirtioPCIBar.config:
+            writeConfigBar(offset: off, size: size, value: value)
+        case VirtioPCIBar.msix:
             writeBar4MSIX(offset: off, size: size, value: value)
         default:
             break
@@ -397,10 +396,10 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
         // Nothing to do — virtio caps already encode BAR-relative offsets.
     }
 
-    // MARK: - BAR0 Dispatch (Virtio Regions)
+    // MARK: - Config BAR Dispatch (Virtio Regions)
 
-    private func readBar0(offset: Int, size: Int) -> UInt64 {
-        let layout = bar0Layout
+    private func readConfigBar(offset: Int, size: Int) -> UInt64 {
+        let layout = configBarLayout
 
         if offset >= layout.commonCfgOffset && offset < layout.commonCfgOffset + layout.commonCfgSize {
             let reg = offset - layout.commonCfgOffset
@@ -426,8 +425,8 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
         return 0
     }
 
-    private func writeBar0(offset: Int, size: Int, value: UInt64) {
-        let layout = bar0Layout
+    private func writeConfigBar(offset: Int, size: Int, value: UInt64) {
+        let layout = configBarLayout
 
         if offset >= layout.commonCfgOffset && offset < layout.commonCfgOffset + layout.commonCfgSize {
             let reg = offset - layout.commonCfgOffset
@@ -588,6 +587,61 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
         }
     }
 
+    private func handleBARConfigWrite(barIndex: Int, value: UInt32) {
+        guard barIndex >= 0 && barIndex < bars.count else { return }
+        let barInfo = bars[barIndex]
+
+        switch barInfo.type {
+        case .unused:
+            return
+
+        case .memory32:
+            if value == 0xFFFF_FFFF {
+                var sizeMask = ~(UInt32(truncatingIfNeeded: barInfo.size) - 1) & 0xFFFF_FFF0
+                if barInfo.prefetchable { sizeMask |= 0x08 }
+                configSpace.setBarValue(at: barIndex, value: sizeMask)
+            } else {
+                let addr = value & 0xFFFF_FFF0
+                configSpace.setBarValue(at: barIndex, value: addr | (barInfo.prefetchable ? 0x08 : 0x00))
+            }
+
+        case .memory64:
+            if value == 0xFFFF_FFFF {
+                var sizeMask = ~(UInt32(truncatingIfNeeded: barInfo.size) - 1) & 0xFFFF_FFF0
+                sizeMask |= 0x04
+                if barInfo.prefetchable { sizeMask |= 0x08 }
+                configSpace.setBarValue(at: barIndex, value: sizeMask)
+            } else {
+                let addr = value & 0xFFFF_FFF0
+                configSpace.setBarValue(at: barIndex, value: addr | 0x04 | (barInfo.prefetchable ? 0x08 : 0x00))
+            }
+
+        case .memory64High:
+            let lowIndex = barIndex - 1
+            guard lowIndex >= 0,
+                  lowIndex < bars.count,
+                  bars[lowIndex].type == .memory64 else {
+                return
+            }
+
+            if value == 0xFFFF_FFFF {
+                let lowBar = bars[lowIndex]
+                let highMask = UInt32(truncatingIfNeeded: (~(lowBar.size - 1)) >> 32)
+                configSpace.setBarValue(at: barIndex, value: highMask)
+            } else {
+                configSpace.setBarValue(at: barIndex, value: value)
+            }
+
+        case .io:
+            if value == 0xFFFF_FFFF {
+                let sizeMask = (~(UInt32(truncatingIfNeeded: barInfo.size) - 1) & 0xFFFF_FFFC) | 0x01
+                configSpace.setBarValue(at: barIndex, value: sizeMask)
+            } else {
+                configSpace.setBarValue(at: barIndex, value: (value & 0xFFFF_FFFC) | 0x01)
+            }
+        }
+    }
+
     /// Pre-allocate MSI SPI INTIDs when MSI-X is first enabled.
     private func allocateMSIXVectors() {
         guard let msi = msiController else { return }
@@ -635,7 +689,7 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
     /// 4. Virtio Device Cfg (vendor-specific, 16 bytes)
     /// 5. MSI-X (12 bytes)
     private static func buildCapabilities(
-        bar0Layout: VirtioBar0Layout,
+        configBarLayout: VirtioConfigBarLayout,
         msixVectorCount: Int
     ) -> (data: [UInt8], msixOffset: Int) {
         var data: [UInt8] = []
@@ -658,9 +712,9 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
             nextPtr: UInt8(base + notifyCapOff),
             capLen: UInt8(commonCapSize),
             cfgType: .commonCfg,
-            bar: 0,
-            offset: UInt32(bar0Layout.commonCfgOffset),
-            length: UInt32(bar0Layout.commonCfgSize)
+            bar: UInt8(VirtioPCIBar.config),
+            offset: UInt32(configBarLayout.commonCfgOffset),
+            length: UInt32(configBarLayout.commonCfgSize)
         ))
 
         // 2. Notification capability (with multiplier).
@@ -668,11 +722,11 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
             nextPtr: UInt8(base + isrCapOff),
             capLen: UInt8(notifyCapSize),
             cfgType: .notifyCfg,
-            bar: 0,
-            offset: UInt32(bar0Layout.notifyOffset),
-            length: UInt32(bar0Layout.notifySize)
+            bar: UInt8(VirtioPCIBar.config),
+            offset: UInt32(configBarLayout.notifyOffset),
+            length: UInt32(configBarLayout.notifySize)
         )
-        var multiplier = bar0Layout.notifyOffMultiplier.littleEndian
+        var multiplier = configBarLayout.notifyOffMultiplier.littleEndian
         withUnsafeBytes(of: &multiplier) { notifyCap.append(contentsOf: $0) }
         data.append(contentsOf: notifyCap)
 
@@ -681,9 +735,9 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
             nextPtr: UInt8(base + deviceCapOff),
             capLen: UInt8(isrCapSize),
             cfgType: .isrCfg,
-            bar: 0,
-            offset: UInt32(bar0Layout.isrOffset),
-            length: UInt32(bar0Layout.isrSize)
+            bar: UInt8(VirtioPCIBar.config),
+            offset: UInt32(configBarLayout.isrOffset),
+            length: UInt32(configBarLayout.isrSize)
         ))
 
         // 4. Device-specific Configuration capability.
@@ -691,18 +745,18 @@ public final class VirtioTransport: PCIDeviceEmulation, @unchecked Sendable {
             nextPtr: UInt8(base + msixCapOff),
             capLen: UInt8(deviceCapSize),
             cfgType: .deviceCfg,
-            bar: 0,
-            offset: UInt32(bar0Layout.deviceCfgOffset),
-            length: UInt32(bar0Layout.deviceCfgSize)
+            bar: UInt8(VirtioPCIBar.config),
+            offset: UInt32(configBarLayout.deviceCfgOffset),
+            length: UInt32(configBarLayout.deviceCfgSize)
         ))
 
         // 5. MSI-X capability.
         data.append(contentsOf: buildMSIXCap(
             nextPtr: 0,
             tableSize: UInt16(msixVectorCount - 1),
-            tableBIR: 4,
+            tableBIR: UInt8(VirtioPCIBar.msix),
             tableOffset: 0,
-            pbaBIR: 4,
+            pbaBIR: UInt8(VirtioPCIBar.msix),
             pbaOffset: UInt32(msixVectorCount * 16)
         ))
 
