@@ -511,6 +511,40 @@ final class FlashDeviceTests: XCTestCase {
         XCTAssertEqual(value, 0x00)
     }
 
+    func testBufferedProgramWithInterleaved32BitWrites() {
+        let flash = makeFlash()
+        let varsOffset: UInt64 = 4096
+
+        // Intel write-buffer program, as used by EDK2 pflash drivers on
+        // QEMU virt: setup, poll status, count, data words, confirm.
+        flash.mmioWrite(offset: varsOffset, size: 4, value: 0x00E8_00E8)
+        XCTAssertEqual(flash.mmioRead(offset: varsOffset, size: 4), 0x0080_0080)
+
+        flash.mmioWrite(offset: varsOffset, size: 4, value: 0x0001_0001)
+        flash.mmioWrite(offset: varsOffset, size: 4, value: 0x1122_3344)
+        flash.mmioWrite(offset: varsOffset + 4, size: 4, value: 0x5566_7788)
+        flash.mmioWrite(offset: varsOffset, size: 4, value: 0x00D0_00D0)
+
+        flash.mmioWrite(offset: varsOffset, size: 1, value: 0xFF)
+        XCTAssertEqual(flash.mmioRead(offset: varsOffset, size: 8), 0x5566_7788_1122_3344)
+    }
+
+    func testBufferedProgramCanOnlyClearBits() {
+        var vars = Data(repeating: 0xFF, count: 4096)
+        vars[0] = 0xF0
+        vars[1] = 0x0F
+        let flash = makeFlash(varsData: vars)
+        let varsOffset: UInt64 = 4096
+
+        flash.mmioWrite(offset: varsOffset, size: 4, value: 0x00E8_00E8)
+        flash.mmioWrite(offset: varsOffset, size: 4, value: 0x0000_0000)
+        flash.mmioWrite(offset: varsOffset, size: 4, value: 0xFFFF_000F)
+        flash.mmioWrite(offset: varsOffset, size: 4, value: 0x00D0_00D0)
+
+        flash.mmioWrite(offset: varsOffset, size: 1, value: 0xFF)
+        XCTAssertEqual(flash.mmioRead(offset: varsOffset, size: 4), 0xFFFF_0000)
+    }
+
     func testWordProgramOnCodeBankFails() {
         let flash = makeFlash()
 

@@ -13,6 +13,7 @@
 //   - Read Array (normal read)
 //   - CFI Query (0x98 at offset 0x55)
 //   - Word Program (0x40 / 0x10)
+//   - Buffered Program (0xE8 + count + data + 0xD0 confirm)
 //   - Block Erase (0x20 + 0xD0 confirm)
 //   - Status Register Read (0x70)
 //   - Clear Status Register (0x50)
@@ -36,6 +37,12 @@ private enum FlashState {
     case programming
     /// Waiting for erase confirm (0xD0) after block erase setup (0x20).
     case eraseSetup(blockOffset: Int)
+    /// Waiting for write-buffer word count after buffered-program setup (0xE8).
+    case writeBufferLoad(blockOffset: Int)
+    /// Collecting write-buffer data words.
+    case writeBufferData(blockOffset: Int)
+    /// Waiting for buffered-program confirm (0xD0).
+    case writeBufferConfirm(blockOffset: Int)
     /// Status register read mode.
     case readStatus
     /// Read electronic signature / device ID mode.
@@ -164,6 +171,9 @@ private final class FlashBank {
     /// Command state machine.
     var state: FlashState = .readArray
 
+    /// Buffered program state, populated while handling 0xE8 sequences.
+    var writeBuffer: FlashWriteBuffer?
+
     init(data: Data, writable: Bool, blockSize: Int) {
         self.data = data
         self.writable = writable
@@ -174,7 +184,22 @@ private final class FlashBank {
     /// Reset the bank to read-array mode.
     func resetState() {
         state = .readArray
+        writeBuffer = nil
         status = FlashStatus.ready
+    }
+}
+
+private struct FlashWriteBuffer {
+    let startOffset: Int
+    let expectedBytes: Int
+    var receivedBytes: Int
+    var data: Data
+
+    init(startOffset: Int, expectedBytes: Int) {
+        self.startOffset = startOffset
+        self.expectedBytes = expectedBytes
+        self.receivedBytes = 0
+        self.data = Data(repeating: 0xFF, count: expectedBytes)
     }
 }
 
@@ -406,7 +431,7 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
         case .cfiQuery:
             return readCFIData(bank, offset: offset, size: size)
 
-        case .readStatus, .programming, .eraseSetup:
+        case .readStatus, .programming, .eraseSetup, .writeBufferLoad, .writeBufferData, .writeBufferConfirm:
             return replicateFlashByte(bank.status, offset: offset, size: size)
 
         case .readID:
@@ -492,6 +517,21 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
                 bank.status |= FlashStatus.eraseError
                 bank.state = .readStatus
             }
+
+        case .writeBufferLoad(let blockOffset):
+            loadWriteBufferCount(bank, blockOffset: blockOffset, offset: offset, size: size, value: value)
+
+        case .writeBufferData(let blockOffset):
+            appendWriteBufferData(bank, blockOffset: blockOffset, offset: offset, size: size, value: value)
+
+        case .writeBufferConfirm:
+            if command == 0xD0 {
+                executeBufferedProgram(bank)
+            } else {
+                bank.writeBuffer = nil
+                bank.status |= FlashStatus.programError
+                bank.state = .readStatus
+            }
         }
     }
 
@@ -516,6 +556,19 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
                 bank.state = .readStatus
             }
 
+        case 0xE8:
+            // Buffered Program (Setup). The following write supplies a word
+            // count, then data words are collected until 0xD0 confirm.
+            if bank.writable {
+                let blockOffset = (offset / bank.blockSize) * bank.blockSize
+                bank.writeBuffer = nil
+                bank.status = FlashStatus.ready
+                bank.state = .writeBufferLoad(blockOffset: blockOffset)
+            } else {
+                bank.status |= FlashStatus.programError
+                bank.state = .readStatus
+            }
+
         case 0x20:
             // Block Erase (Setup)
             if bank.writable {
@@ -528,12 +581,15 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
 
         case 0x70:
             // Status Register Read
-            bank.state = .readStatus
+            if bank.writeBuffer == nil {
+                bank.state = .readStatus
+            }
 
         case 0x50:
             // Clear Status Register
             bank.status = FlashStatus.ready
             bank.state = .readArray
+            bank.writeBuffer = nil
 
         case 0x90:
             // Read Electronic Signature
@@ -556,9 +612,32 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
             offset,
             size,
             value,
-            String(describing: bank.state)
+            stateDescription(bank.state)
         )
         FileHandle.standardError.write(Data(line.utf8))
+    }
+
+    private func stateDescription(_ state: FlashState) -> String {
+        switch state {
+        case .readArray:
+            return "readArray"
+        case .cfiQuery:
+            return "cfiQuery"
+        case .programming:
+            return "programming"
+        case .eraseSetup(let blockOffset):
+            return "eraseSetup(blockOffset: \(blockOffset))"
+        case .writeBufferLoad(let blockOffset):
+            return "writeBufferLoad(blockOffset: \(blockOffset))"
+        case .writeBufferData(let blockOffset):
+            return "writeBufferData(blockOffset: \(blockOffset))"
+        case .writeBufferConfirm(let blockOffset):
+            return "writeBufferConfirm(blockOffset: \(blockOffset))"
+        case .readStatus:
+            return "readStatus"
+        case .readID:
+            return "readID"
+        }
     }
 
     /// Execute a word program operation on the bank.
@@ -581,6 +660,94 @@ public final class FlashDevice: MMIODevice, @unchecked Sendable {
             }
         }
 
+        varsDirty = true
+        bank.status = FlashStatus.ready
+        bank.state = .readStatus
+    }
+
+    private func loadWriteBufferCount(
+        _ bank: FlashBank,
+        blockOffset: Int,
+        offset: Int,
+        size: Int,
+        value: UInt64
+    ) {
+        let transferCount = Int(UInt8(truncatingIfNeeded: value)) + 1
+        let expectedBytes = transferCount * size
+        guard bank.writable,
+              transferCount > 0,
+              expectedBytes > 0,
+              offset >= blockOffset,
+              offset + expectedBytes <= min(blockOffset + bank.blockSize, bank.data.count) else {
+            bank.writeBuffer = nil
+            bank.status |= FlashStatus.programError
+            bank.state = .readStatus
+            return
+        }
+
+        bank.writeBuffer = FlashWriteBuffer(startOffset: offset, expectedBytes: expectedBytes)
+        bank.status = FlashStatus.ready
+        bank.state = .writeBufferData(blockOffset: blockOffset)
+    }
+
+    private func appendWriteBufferData(
+        _ bank: FlashBank,
+        blockOffset: Int,
+        offset: Int,
+        size: Int,
+        value: UInt64
+    ) {
+        guard bank.writable,
+              var writeBuffer = bank.writeBuffer,
+              offset >= writeBuffer.startOffset,
+              offset + size <= writeBuffer.startOffset + writeBuffer.expectedBytes else {
+            bank.writeBuffer = nil
+            bank.status |= FlashStatus.programError
+            bank.state = .readStatus
+            return
+        }
+
+        let bufferOffset = offset - writeBuffer.startOffset
+        writeBuffer.data.withUnsafeMutableBytes { ptr in
+            for i in 0..<size {
+                let newByte = UInt8(truncatingIfNeeded: value >> (i * 8))
+                ptr.storeBytes(of: newByte, toByteOffset: bufferOffset + i, as: UInt8.self)
+            }
+        }
+        writeBuffer.receivedBytes = max(writeBuffer.receivedBytes, bufferOffset + size)
+        bank.writeBuffer = writeBuffer
+        bank.status = FlashStatus.ready
+        if writeBuffer.receivedBytes >= writeBuffer.expectedBytes {
+            bank.state = .writeBufferConfirm(blockOffset: blockOffset)
+        } else {
+            bank.state = .writeBufferData(blockOffset: blockOffset)
+        }
+    }
+
+    private func executeBufferedProgram(_ bank: FlashBank) {
+        guard bank.writable,
+              let writeBuffer = bank.writeBuffer,
+              writeBuffer.receivedBytes >= writeBuffer.expectedBytes,
+              writeBuffer.startOffset >= 0,
+              writeBuffer.startOffset + writeBuffer.expectedBytes <= bank.data.count else {
+            bank.writeBuffer = nil
+            bank.status |= FlashStatus.programError
+            bank.state = .readStatus
+            return
+        }
+
+        bank.data.withUnsafeMutableBytes { destPtr in
+            writeBuffer.data.withUnsafeBytes { srcPtr in
+                for i in 0..<writeBuffer.expectedBytes {
+                    let newByte = srcPtr.load(fromByteOffset: i, as: UInt8.self)
+                    let byteOffset = writeBuffer.startOffset + i
+                    let existingByte = destPtr.load(fromByteOffset: byteOffset, as: UInt8.self)
+                    destPtr.storeBytes(of: existingByte & newByte, toByteOffset: byteOffset, as: UInt8.self)
+                }
+            }
+        }
+
+        bank.writeBuffer = nil
         varsDirty = true
         bank.status = FlashStatus.ready
         bank.state = .readStatus
