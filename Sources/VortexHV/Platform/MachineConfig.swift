@@ -143,7 +143,10 @@ public enum MachineMemoryMap {
     public static let pciMmio64Size: UInt64 = 0x80_0000_0000
 
     // -- DTB ----------------------------------------------------------------
-    /// Default address to place the flattened device tree in RAM.
+    /// QEMU ArmVirt UEFI firmware expects the initial flattened device tree at
+    /// the base of DRAM.
+    public static let uefiDTBAddress: UInt64 = ramBase
+    /// Default address to place the flattened device tree for direct Linux boot.
     /// Typically placed at RAM base + 64 MiB.
     public static let dtbAddress: UInt64 = ramBase + 0x0400_0000
 

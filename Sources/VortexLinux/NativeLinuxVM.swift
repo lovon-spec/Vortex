@@ -68,6 +68,7 @@ public final class NativeLinuxVM: @unchecked Sendable {
             initrdPath: configuration.bootConfig.initrdPath,
             bootArgs: configuration.bootConfig.kernelCommandLine ?? "",
             entryPoint: Self.entryPoint(for: configuration.bootConfig),
+            bootArgumentAddress: Self.bootArgumentAddress(for: configuration.bootConfig),
             guestOS: .linux
         ))
 
@@ -438,6 +439,15 @@ public final class NativeLinuxVM: @unchecked Sendable {
         }
     }
 
+    private static func bootArgumentAddress(for bootConfig: BootConfig) -> UInt64 {
+        switch bootConfig.mode {
+        case .uefi:
+            return MachineMemoryMap.uefiDTBAddress
+        case .linuxKernel, .macOS:
+            return MachineMemoryMap.dtbAddress
+        }
+    }
+
     private func loadDirectLinuxBootPayload() throws {
         guard let kernelPath = configuration.bootConfig.kernelPath else {
             throw VortexError.fileNotFound(path: "<kernel>")
@@ -509,6 +519,7 @@ public final class NativeLinuxVM: @unchecked Sendable {
 
         _ = vm.loadDTB(
             bootArgs: "",
+            at: MachineMemoryMap.uefiDTBAddress,
             virtioMMIODeviceCount: usesPCIVirtio ? 0 : configuration.storage.disks.count,
             includePCIHostBridge: usesPCIVirtio
         )
