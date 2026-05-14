@@ -258,6 +258,18 @@ public final class DescriptorChain: Sequence, Sendable {
     public func makeIterator() -> Iterator {
         Iterator(startIndex: headIndex, queue: queue, maxDescriptors: maxDescriptors)
     }
+
+    /// Read the guest buffer described by `descriptor`.
+    public func readBuffer(_ descriptor: VirtqDescriptor) -> Data {
+        queue.guestMemory.read(at: descriptor.addr, size: Int(descriptor.len))
+    }
+
+    /// Write data into the guest buffer described by `descriptor`.
+    public func writeBuffer(_ data: Data, to descriptor: VirtqDescriptor, maxLength: Int? = nil) {
+        let limit = Swift.min(maxLength ?? Int(descriptor.len), Int(descriptor.len), data.count)
+        guard limit > 0 else { return }
+        queue.guestMemory.write(at: descriptor.addr, data: data.prefixData(limit))
+    }
 }
 
 // MARK: - Available Ring Flags
@@ -272,6 +284,12 @@ public struct VirtqAvailFlags: OptionSet, Sendable {
 
     /// If set, the device should not send interrupts when consuming available descriptors.
     public static let noInterrupt = VirtqAvailFlags(rawValue: 1 << 0)
+}
+
+private extension Data {
+    func prefixData(_ count: Int) -> Data {
+        subdata(in: startIndex..<index(startIndex, offsetBy: count))
+    }
 }
 
 // MARK: - Used Ring Flags

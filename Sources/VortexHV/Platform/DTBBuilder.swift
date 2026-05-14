@@ -45,6 +45,13 @@ public final class DTBBuilder {
     private let gicRedistSize: UInt64
     private let uartBase: UInt64
     private let uartIRQ: UInt32
+    private let rtcBase: UInt64
+    private let rtcIRQ: UInt32
+    private let virtioMMIODeviceCount: Int
+    private let virtioMMIOBase: UInt64
+    private let virtioMMIOSize: UInt64
+    private let virtioMMIOStride: UInt64
+    private let virtioMMIOIRQBase: UInt32
     private let initrdStart: UInt64?
     private let initrdEnd: UInt64?
 
@@ -63,6 +70,13 @@ public final class DTBBuilder {
         gicRedistSize: UInt64? = nil,
         uartBase: UInt64 = MachineMemoryMap.uart0Base,
         uartIRQ: UInt32 = MachineIRQ.uart0,
+        rtcBase: UInt64 = MachineMemoryMap.rtcBase,
+        rtcIRQ: UInt32 = MachineIRQ.rtc,
+        virtioMMIODeviceCount: Int = 0,
+        virtioMMIOBase: UInt64 = MachineMemoryMap.virtioMMIOBase,
+        virtioMMIOSize: UInt64 = MachineMemoryMap.virtioMMIODeviceSize,
+        virtioMMIOStride: UInt64 = MachineMemoryMap.virtioMMIODeviceStride,
+        virtioMMIOIRQBase: UInt32 = MachineIRQ.virtioMMIOBase,
         initrdStart: UInt64? = nil,
         initrdEnd: UInt64? = nil
     ) {
@@ -75,6 +89,13 @@ public final class DTBBuilder {
         self.gicRedistSize = gicRedistSize ?? (UInt64(cpuCount) * MachineMemoryMap.gicRedistributorPerCPUSize)
         self.uartBase = uartBase
         self.uartIRQ = uartIRQ
+        self.rtcBase = rtcBase
+        self.rtcIRQ = rtcIRQ
+        self.virtioMMIODeviceCount = virtioMMIODeviceCount
+        self.virtioMMIOBase = virtioMMIOBase
+        self.virtioMMIOSize = virtioMMIOSize
+        self.virtioMMIOStride = virtioMMIOStride
+        self.virtioMMIOIRQBase = virtioMMIOIRQBase
         self.initrdStart = initrdStart
         self.initrdEnd = initrdEnd
     }
@@ -117,6 +138,12 @@ public final class DTBBuilder {
 
         // -- UART node --
         buildUARTNode()
+
+        // -- RTC node --
+        buildRTCNode()
+
+        // -- virtio-mmio devices --
+        buildVirtioMMIONodes()
 
         // -- PSCI node --
         buildPSCINode()
@@ -213,6 +240,31 @@ public final class DTBBuilder {
         let clocks: [UInt32] = [0x1800_0000, 0x1800_0000] // 24 MHz in Hz
         addProperty("clocks", u32Array: clocks)
         endNode()
+    }
+
+    private func buildRTCNode() {
+        beginNode("rtc@\(String(rtcBase, radix: 16))")
+        addProperty("compatible", stringList: ["arm,pl031", "arm,primecell"])
+        addProperty("reg", u64Pair: (rtcBase, MachineMemoryMap.rtcSize))
+        let spiNumber = rtcIRQ - 32
+        addProperty("interrupts", u32Array: [0, spiNumber, 4])
+        addProperty("clock-names", stringList: ["apb_pclk"])
+        addProperty("clocks", u32Array: [0x1800_0000])
+        endNode()
+    }
+
+    private func buildVirtioMMIONodes() {
+        guard virtioMMIODeviceCount > 0 else { return }
+
+        for index in 0..<virtioMMIODeviceCount {
+            let base = virtioMMIOBase + UInt64(index) * virtioMMIOStride
+            let intid = virtioMMIOIRQBase + UInt32(index)
+            beginNode("virtio_mmio@\(String(base, radix: 16))")
+            addProperty("compatible", stringList: ["virtio,mmio"])
+            addProperty("reg", u64Pair: (base, virtioMMIOSize))
+            addProperty("interrupts", u32Array: [0, intid - 32, 4])
+            endNode()
+        }
     }
 
     private func buildPSCINode() {

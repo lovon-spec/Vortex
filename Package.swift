@@ -164,6 +164,13 @@ let package = Package(
             ]
         ),
 
+        // MARK: - Native Linux backend
+        .target(
+            name: "VortexLinux",
+            dependencies: ["VortexCore", "VortexHV", "VortexDevices"],
+            path: "Sources/VortexLinux"
+        ),
+
         // MARK: - VM owner service and local control plane
         .target(
             name: "VortexService",
@@ -239,6 +246,7 @@ let package = Package(
                 "VortexCore",
                 "VortexHV",
                 "VortexDevices",
+                "VortexLinux",
                 "VortexAudio",
                 "VortexBoot",
                 "VortexPersistence",

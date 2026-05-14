@@ -482,6 +482,16 @@ open class VirtioDeviceBase: @unchecked Sendable {
         return value
     }
 
+    /// Read ISR status without clearing it.
+    public func readISRStatus() -> UInt8 {
+        isrStatus
+    }
+
+    /// Acknowledge ISR status bits.
+    public func acknowledgeISR(mask: UInt8) {
+        isrStatus &= ~mask
+    }
+
     // MARK: - Abstract Methods (Override in Subclasses)
 
     /// Process I/O on a specific virtqueue.

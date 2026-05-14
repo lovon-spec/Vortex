@@ -12,6 +12,7 @@ struct VortexCLI: AsyncParsableCommand {
             CreateVMCommand.self,
             InstallMacOSCommand.self,
             StartVMCommand.self,
+            StartLinuxHVCommand.self,
             StopVMCommand.self,
             ListVMsCommand.self,
             MeasureLatencyCommand.self,

@@ -20,6 +20,9 @@ public struct VMConfiguration: Codable, Identifiable, Sendable, Hashable {
     /// The guest operating system type.
     public var guestOS: GuestOS
 
+    /// The VM execution backend.
+    public var backend: VMBackend
+
     /// CPU and memory allocation.
     public var hardware: HardwareProfile
 
@@ -62,6 +65,7 @@ public struct VMConfiguration: Codable, Identifiable, Sendable, Hashable {
         id: UUID = UUID(),
         identity: VMIdentity,
         guestOS: GuestOS,
+        backend: VMBackend = .appleVirtualization,
         hardware: HardwareProfile = .standard,
         storage: StorageConfiguration = StorageConfiguration(),
         network: NetworkConfiguration = .singleNAT,
@@ -78,6 +82,7 @@ public struct VMConfiguration: Codable, Identifiable, Sendable, Hashable {
         self.id = id
         self.identity = identity
         self.guestOS = guestOS
+        self.backend = backend
         self.hardware = hardware
         self.storage = storage
         self.network = network
@@ -164,6 +169,34 @@ public struct VMConfiguration: Codable, Identifiable, Sendable, Hashable {
             }
         }
 
+        // Backend support
+        switch backend {
+        case .appleVirtualization:
+            break
+        case .vortexHV:
+            if guestOS != .linuxARM64 {
+                issues.append("VortexHV backend currently supports Linux ARM64 guests.")
+            }
+            if bootConfig.mode == .macOS {
+                issues.append("VortexHV backend cannot use macOS boot mode.")
+            }
+            if !network.interfaces.isEmpty {
+                issues.append("VortexHV backend does not support virtual networking yet.")
+            }
+            if audio.enabled {
+                issues.append("VortexHV backend does not support audio devices yet.")
+            }
+            if usb.enabled {
+                issues.append("VortexHV backend does not support USB passthrough yet.")
+            }
+            if !sharedFolders.isEmpty {
+                issues.append("VortexHV backend does not support shared folders yet.")
+            }
+            if rosetta?.enabled == true {
+                issues.append("VortexHV backend does not support Rosetta yet.")
+            }
+        }
+
         // Rosetta
         if let rosetta = rosetta, rosetta.enabled, !guestOS.supportsRosetta {
             issues.append("Rosetta is only supported on Linux ARM64 guests.")
@@ -180,6 +213,67 @@ public struct VMConfiguration: Codable, Identifiable, Sendable, Hashable {
     /// Whether the configuration passes all validation checks.
     public var isValid: Bool {
         validate().isEmpty
+    }
+
+    // MARK: - Codable compatibility
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case identity
+        case guestOS
+        case backend
+        case hardware
+        case storage
+        case network
+        case display
+        case audio
+        case usb
+        case sharedFolders
+        case clipboard
+        case rosetta
+        case bootConfig
+        case createdAt
+        case modifiedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.identity = try container.decode(VMIdentity.self, forKey: .identity)
+        self.guestOS = try container.decode(GuestOS.self, forKey: .guestOS)
+        self.backend = try container.decodeIfPresent(VMBackend.self, forKey: .backend) ?? .appleVirtualization
+        self.hardware = try container.decode(HardwareProfile.self, forKey: .hardware)
+        self.storage = try container.decode(StorageConfiguration.self, forKey: .storage)
+        self.network = try container.decode(NetworkConfiguration.self, forKey: .network)
+        self.display = try container.decode(DisplayConfiguration.self, forKey: .display)
+        self.audio = try container.decode(AudioConfig.self, forKey: .audio)
+        self.usb = try container.decodeIfPresent(USBConfig.self, forKey: .usb) ?? .disabled
+        self.sharedFolders = try container.decodeIfPresent([SharedFolderConfig].self, forKey: .sharedFolders) ?? []
+        self.clipboard = try container.decode(ClipboardConfig.self, forKey: .clipboard)
+        self.rosetta = try container.decodeIfPresent(RosettaConfig.self, forKey: .rosetta)
+        self.bootConfig = try container.decode(BootConfig.self, forKey: .bootConfig)
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+        self.modifiedAt = try container.decode(Date.self, forKey: .modifiedAt)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(identity, forKey: .identity)
+        try container.encode(guestOS, forKey: .guestOS)
+        try container.encode(backend, forKey: .backend)
+        try container.encode(hardware, forKey: .hardware)
+        try container.encode(storage, forKey: .storage)
+        try container.encode(network, forKey: .network)
+        try container.encode(display, forKey: .display)
+        try container.encode(audio, forKey: .audio)
+        try container.encode(usb, forKey: .usb)
+        try container.encode(sharedFolders, forKey: .sharedFolders)
+        try container.encodeIfPresent(rosetta, forKey: .rosetta)
+        try container.encode(clipboard, forKey: .clipboard)
+        try container.encode(bootConfig, forKey: .bootConfig)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(modifiedAt, forKey: .modifiedAt)
     }
 
     // MARK: - Path introspection

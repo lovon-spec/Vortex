@@ -17,6 +17,10 @@ public struct VMConfig: Sendable {
     public var initrdPath: String?
     /// Kernel boot arguments.
     public var bootArgs: String
+    /// Initial PC for the boot CPU. Defaults to the direct Linux kernel load address.
+    public var entryPoint: UInt64
+    /// Initial X0 value for the boot CPU. Linux and UEFI receive the DTB address here.
+    public var bootArgumentAddress: UInt64
     /// Guest OS type hint.
     public var guestOS: GuestOSHint
 
@@ -32,6 +36,8 @@ public struct VMConfig: Sendable {
         kernelPath: String? = nil,
         initrdPath: String? = nil,
         bootArgs: String = "",
+        entryPoint: UInt64 = MachineMemoryMap.kernelLoadAddress,
+        bootArgumentAddress: UInt64 = MachineMemoryMap.dtbAddress,
         guestOS: GuestOSHint = .linux
     ) {
         self.cpuCount = cpuCount
@@ -39,6 +45,8 @@ public struct VMConfig: Sendable {
         self.kernelPath = kernelPath
         self.initrdPath = initrdPath
         self.bootArgs = bootArgs
+        self.entryPoint = entryPoint
+        self.bootArgumentAddress = bootArgumentAddress
         self.guestOS = guestOS
     }
 }
@@ -56,6 +64,7 @@ public struct VMConfig: Sendable {
 /// 0x0900_0000                                    -- UART0 (PL011)
 /// 0x0901_0000                                    -- RTC (PL031)
 /// 0x0902_0000                                    -- fw_cfg device
+/// 0x0A00_0000 ..                                 -- virtio-mmio devices
 /// 0x0C00_0000                                    -- GIC MSI frame
 /// 0x1000_0000                                    -- PCI ECAM
 /// 0x2000_0000                                    -- PCI MMIO (32-bit window)
@@ -95,6 +104,14 @@ public enum MachineMemoryMap {
     public static let fwCfgBase: UInt64 = 0x0902_0000
     /// fw_cfg region size.
     public static let fwCfgSize: UInt64 = 0x0000_1000
+
+    // -- Virtio MMIO --------------------------------------------------------
+    /// Base address for native Linux virtio-mmio devices.
+    public static let virtioMMIOBase: UInt64 = 0x0A00_0000
+    /// Size of one virtio-mmio transport region.
+    public static let virtioMMIODeviceSize: UInt64 = 0x0000_0200
+    /// Address stride between virtio-mmio transport regions.
+    public static let virtioMMIODeviceStride: UInt64 = 0x0000_1000
 
     // -- PCI ----------------------------------------------------------------
     /// PCI Express ECAM configuration space base.
@@ -141,6 +158,8 @@ public enum MachineIRQ {
     public static let pciIntxBase: UInt32 = 36
     /// Number of PCI INTx lines.
     public static let pciIntxCount: UInt32 = 4
+    /// Base SPI for virtio-mmio devices.
+    public static let virtioMMIOBase: UInt32 = 40
     /// MSI SPI range start.
     public static let msiBase: UInt32 = 64
     /// Number of MSI SPIs.

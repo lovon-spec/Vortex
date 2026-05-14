@@ -144,13 +144,15 @@ public final class VirtualMachine: @unchecked Sendable {
         bootArgs: String? = nil,
         at gpa: UInt64 = MachineMemoryMap.dtbAddress,
         initrdStart: UInt64? = nil,
-        initrdEnd: UInt64? = nil
+        initrdEnd: UInt64? = nil,
+        virtioMMIODeviceCount: Int = 0
     ) -> (gpa: UInt64, size: Int) {
         let builder = DTBBuilder(
             cpuCount: config.cpuCount,
             ramBase: MachineMemoryMap.ramBase,
             ramSize: config.ramSize,
             bootArgs: bootArgs ?? config.bootArgs,
+            virtioMMIODeviceCount: virtioMMIODeviceCount,
             initrdStart: initrdStart,
             initrdEnd: initrdEnd
         )
@@ -273,10 +275,10 @@ public final class VirtualMachine: @unchecked Sendable {
             // Primary CPU (index 0) gets the boot configuration.
             if cpuIndex == 0 {
                 // Set PC to kernel entry point.
-                _ = hv_vcpu_set_reg(vcpu, HV_REG_PC, MachineMemoryMap.kernelLoadAddress)
+                _ = hv_vcpu_set_reg(vcpu, HV_REG_PC, self.config.entryPoint)
 
                 // X0 = DTB address (Linux boot protocol).
-                _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, MachineMemoryMap.dtbAddress)
+                _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, self.config.bootArgumentAddress)
 
                 // Start in EL1h with interrupts masked.
                 // CPSR: M[3:0]=0b0101 (EL1h), D=1, A=1, I=1, F=1

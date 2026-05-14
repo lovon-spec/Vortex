@@ -677,6 +677,12 @@ public final class VZVMManager: NSObject {
                 throw VortexError.fileNotFound(path: disk.imagePath)
             }
 
+            guard disk.resolvedImageFormat == .raw else {
+                throw VortexError.diskOperationFailed(
+                    reason: "Virtualization.framework storage only supports RAW disk images. Disk '\(disk.label)' is \(disk.resolvedImageFormat.rawValue); use the VortexHV Linux backend for qcow2."
+                )
+            }
+
             let attachment: VZDiskImageStorageDeviceAttachment
             do {
                 let cachingMode: VZDiskImageCachingMode = {
