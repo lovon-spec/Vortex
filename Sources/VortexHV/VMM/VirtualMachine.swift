@@ -64,6 +64,9 @@ public final class VirtualMachine: @unchecked Sendable {
     /// Emit PSCI calls to stderr when debugging early firmware bring-up.
     private let tracePSCI = ProcessInfo.processInfo.environment["VORTEX_HV_TRACE_PSCI"] == "1"
 
+    /// Diagnostic switch for validating Hypervisor.framework HVC PC semantics.
+    private let skipFirmwareCallPCAdvance = ProcessInfo.processInfo.environment["VORTEX_HV_SKIP_HVC_PC_ADVANCE"] == "1"
+
     // MARK: - Initialization
 
     /// Create a new virtual machine.
@@ -372,23 +375,23 @@ public final class VirtualMachine: @unchecked Sendable {
         switch functionID {
         case 0x8000_0000: // SMCCC_VERSION
             _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, 0x0001_0001) // SMCCC v1.1
-            advancePC(vcpu: vcpu)
+            advanceFirmwareCallPC(vcpu: vcpu)
             return true
 
         case 0x8000_0001: // SMCCC_ARCH_FEATURES
             _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, smcccFeatureSupported(UInt32(truncatingIfNeeded: x1)) ? 0 : UInt64(bitPattern: -1))
-            advancePC(vcpu: vcpu)
+            advanceFirmwareCallPC(vcpu: vcpu)
             return true
 
         case 0x8400_0050, 0x8400_0051, 0x8400_0052, 0x8400_0053, 0xC400_0053: // SMCCC TRNG calls
             handleTRNGCall(vcpu: vcpu, functionID: functionID, argument: x1)
-            advancePC(vcpu: vcpu)
+            advanceFirmwareCallPC(vcpu: vcpu)
             return true
 
         case 0x8400_0000: // PSCI_VERSION
             // Return PSCI v1.0
             _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, 0x0001_0000)
-            advancePC(vcpu: vcpu)
+            advanceFirmwareCallPC(vcpu: vcpu)
             return true
 
         case 0xC400_0003, 0x8400_0003: // PSCI_CPU_ON (64-bit / 32-bit)
@@ -401,7 +404,7 @@ public final class VirtualMachine: @unchecked Sendable {
                 let targetThread = vcpuThreads[cpuIndex]
                 guard !targetThread.isRunning else {
                     _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, UInt64(bitPattern: -2)) // ALREADY_ON
-                    advancePC(vcpu: vcpu)
+                    advanceFirmwareCallPC(vcpu: vcpu)
                     return true
                 }
                 targetThread.onVCPUCreated = { vcpu in
@@ -419,14 +422,14 @@ public final class VirtualMachine: @unchecked Sendable {
                 } catch {
                     // CPU already started or error.
                     _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, UInt64(bitPattern: -2)) // ALREADY_ON
-                    advancePC(vcpu: vcpu)
+                    advanceFirmwareCallPC(vcpu: vcpu)
                     return true
                 }
                 _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, 0) // SUCCESS
             } else {
                 _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, UInt64(bitPattern: -1)) // NOT_SUPPORTED
             }
-            advancePC(vcpu: vcpu)
+            advanceFirmwareCallPC(vcpu: vcpu)
             return true
 
         case 0x8400_0008: // PSCI_SYSTEM_OFF
@@ -448,7 +451,7 @@ public final class VirtualMachine: @unchecked Sendable {
         case 0x8400_0001: // PSCI_CPU_SUSPEND
             // Return SUCCESS and let the vCPU idle.
             _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, 0)
-            advancePC(vcpu: vcpu)
+            advanceFirmwareCallPC(vcpu: vcpu)
             return true
 
         case 0x8400_0002: // PSCI_CPU_OFF
@@ -465,13 +468,13 @@ public final class VirtualMachine: @unchecked Sendable {
                     ? 0
                     : UInt64(bitPattern: -1)
             )
-            advancePC(vcpu: vcpu)
+            advanceFirmwareCallPC(vcpu: vcpu)
             return true
 
         default:
             // Unknown PSCI function. Return NOT_SUPPORTED.
             _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, UInt64(bitPattern: -1))
-            advancePC(vcpu: vcpu)
+            advanceFirmwareCallPC(vcpu: vcpu)
             return true
         }
     }
@@ -610,7 +613,8 @@ public final class VirtualMachine: @unchecked Sendable {
         FileHandle.standardError.write(Data(line.utf8))
     }
 
-    private func advancePC(vcpu: hv_vcpu_t) {
+    private func advanceFirmwareCallPC(vcpu: hv_vcpu_t) {
+        guard !skipFirmwareCallPCAdvance else { return }
         var pc: UInt64 = 0
         _ = hv_vcpu_get_reg(vcpu, HV_REG_PC, &pc)
         _ = hv_vcpu_set_reg(vcpu, HV_REG_PC, pc &+ 4)
