@@ -109,6 +109,10 @@ public final class VCPUExitHandler: @unchecked Sendable {
     /// Callback for WFI/WFE traps.
     public var onWFx: ((hv_vcpu_t, Bool) -> Void)? // Bool: true = WFE, false = WFI
 
+    /// Callback for data-abort exits caused by cache maintenance instructions
+    /// whose syndrome does not include a normal load/store register transfer.
+    public var onCacheMaintenanceDataAbort: ((hv_vcpu_t, UInt64) -> Bool)?
+
     public init(addressSpace: AddressSpace) {
         self.addressSpace = addressSpace
     }
@@ -164,9 +168,11 @@ public final class VCPUExitHandler: @unchecked Sendable {
         let issValid = (iss & (1 << 24)) != 0
         guard issValid else {
             if (iss & ESR.issCMBit) != 0 {
-                let instrLen = ESR.is32BitInstruction(syndrome) ? 4 : 2
-                advancePC(vcpu: vcpu, instructionLength: instrLen)
-                return true
+                if onCacheMaintenanceDataAbort?(vcpu, exit.exception.physical_address) != false {
+                    let instrLen = ESR.is32BitInstruction(syndrome) ? 4 : 2
+                    advancePC(vcpu: vcpu, instructionLength: instrLen)
+                    return true
+                }
             }
             let pc = getRegister(vcpu: vcpu, reg: HV_REG_PC)
             VortexLog.hv.error("Data abort with ISV=0 at PC=0x\(String(pc, radix: 16), privacy: .public), ESR=0x\(String(syndrome, radix: 16), privacy: .public), IPA=0x\(String(exit.exception.physical_address, radix: 16), privacy: .public) -- cannot decode MMIO")

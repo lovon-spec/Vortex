@@ -174,6 +174,24 @@ public final class MemoryManager: @unchecked Sendable {
         return nil
     }
 
+    /// Read a little-endian 32-bit value from a mapped guest physical address.
+    public func readUInt32(at gpa: UInt64) -> UInt32? {
+        guard let pointer = hostPointer(for: gpa) else {
+            return nil
+        }
+        return pointer.loadUnaligned(as: UInt32.self).littleEndian
+    }
+
+    /// Zero a mapped guest physical address range.
+    public func zeroMemory(at gpa: UInt64, size: Int) {
+        guard size > 0,
+              let start = hostPointer(for: gpa),
+              hostPointer(for: gpa + UInt64(size - 1)) != nil else {
+            return
+        }
+        memset(start, 0, size)
+    }
+
     /// Unmap all regions and free owned memory.
     public func cleanup() {
         lock.lock()

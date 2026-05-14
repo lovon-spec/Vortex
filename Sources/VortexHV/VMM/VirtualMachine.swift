@@ -268,6 +268,24 @@ public final class VirtualMachine: @unchecked Sendable {
             // yield to avoid spinning.
             Thread.sleep(forTimeInterval: 0.001)
         }
+
+        // EDK2 uses DC ZVA while building early page tables. Hypervisor.framework
+        // reports this as a cache-maintenance data abort with ISV=0, so emulate
+        // the zeroing effect when we can identify the trapped instruction.
+        exitHandler.onCacheMaintenanceDataAbort = { [weak self] vcpu, address in
+            guard let self else { return true }
+            var pc: UInt64 = 0
+            _ = hv_vcpu_get_reg(vcpu, HV_REG_PC, &pc)
+            guard let instruction = self.memoryManager.readUInt32(at: pc) else {
+                return true
+            }
+            if (instruction & 0xFFFF_FFE0) == 0xD50B_7420 {
+                let blockSize = 64
+                let aligned = address & ~UInt64(blockSize - 1)
+                self.memoryManager.zeroMemory(at: aligned, size: blockSize)
+            }
+            return true
+        }
     }
 
     private func configureVCPUThread(_ thread: VCPUThread) {
