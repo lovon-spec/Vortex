@@ -44,6 +44,36 @@ struct DTBBuilderTests {
         #expect(readBE32(uartClocks, at: 4) == 2)
         #expect(readBE32(rtcClocks, at: 0) == 2)
     }
+
+    @Test("PCI interrupt map matches the Linux OF PCI binding tuple shape")
+    func pciInterruptMapShape() throws {
+        let dtb = DTBBuilder(
+            cpuCount: 2,
+            ramSize: 512 * 1024 * 1024,
+            includePCIHostBridge: true
+        ).build()
+
+        let mask = try #require(fdtProperty(dtb, node: "pcie@10000000", property: "interrupt-map-mask"))
+        let map = try #require(fdtProperty(dtb, node: "pcie@10000000", property: "interrupt-map"))
+
+        #expect(readBE32(mask, at: 0) == 0x0000_1800)
+        #expect(readBE32(mask, at: 4) == 0)
+        #expect(readBE32(mask, at: 8) == 0)
+        #expect(readBE32(mask, at: 12) == 7)
+
+        let cellsPerTuple = 10
+        let tupleCount = 4 * 4
+        #expect(map.count == tupleCount * cellsPerTuple * 4)
+
+        #expect(readBE32(map, at: 0) == 0)
+        #expect(readBE32(map, at: 12) == 1) // INTA#
+        #expect(readBE32(map, at: 16) == 1) // GIC phandle
+        #expect(readBE32(map, at: 20) == 0) // GIC parent address cell 0
+        #expect(readBE32(map, at: 24) == 0) // GIC parent address cell 1
+        #expect(readBE32(map, at: 28) == 0) // GIC SPI type
+        #expect(readBE32(map, at: 32) == 4) // INTID 36 as SPI offset 4
+        #expect(readBE32(map, at: 36) == 4) // IRQ_TYPE_LEVEL_HIGH
+    }
 }
 
 private func readBE32(_ data: Data, at offset: Int) -> UInt32 {

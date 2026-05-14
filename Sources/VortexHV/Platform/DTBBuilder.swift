@@ -338,20 +338,22 @@ public final class DTBBuilder {
         appendU64Cells(&ranges, MachineMemoryMap.pciMmio64Size)
         addProperty("ranges", u32Array: ranges)
 
-        addProperty("interrupt-map-mask", u32Array: [0x0000_F800, 0, 0, 7])
+        addProperty("interrupt-map-mask", u32Array: [0x0000_1800, 0, 0, 7])
         addProperty("interrupt-map", u32Array: buildPCIInterruptMap())
         endNode()
     }
 
     private func buildPCIInterruptMap() -> [UInt32] {
         var values: [UInt32] = []
-        for slot in 0..<PCIBus.maxDevices {
+        for slot in 0..<Int(MachineIRQ.pciIntxCount) {
             for pin in 1...4 {
                 values.append(UInt32(slot) << 11)
                 values.append(0)
                 values.append(0)
                 values.append(UInt32(pin))
                 values.append(DTBPhandle.gic)
+                values.append(0)
+                values.append(0)
                 let line = UInt32((slot + pin - 1) % Int(MachineIRQ.pciIntxCount))
                 values.append(0)
                 values.append(MachineIRQ.pciIntxBase + line - 32)
