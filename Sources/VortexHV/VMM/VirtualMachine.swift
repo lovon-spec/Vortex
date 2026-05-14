@@ -136,6 +136,7 @@ public final class VirtualMachine: @unchecked Sendable {
         data.withUnsafeBytes { src in
             hostPtr.copyMemory(from: src.baseAddress!, byteCount: data.count)
         }
+        memoryManager.invalidateInstructionCache(at: gpa, size: data.count)
     }
 
     /// Load a file into guest RAM at a given guest physical address.
@@ -293,6 +294,11 @@ public final class VirtualMachine: @unchecked Sendable {
                 let blockSize = 64
                 let aligned = address & ~UInt64(blockSize - 1)
                 self.memoryManager.zeroMemory(at: aligned, size: blockSize)
+                self.memoryManager.invalidateInstructionCache(at: aligned, size: blockSize)
+            } else {
+                let blockSize = 64
+                let aligned = address & ~UInt64(blockSize - 1)
+                self.memoryManager.invalidateInstructionCache(at: aligned, size: blockSize)
             }
             return true
         }

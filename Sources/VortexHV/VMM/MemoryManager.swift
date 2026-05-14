@@ -4,6 +4,9 @@
 import Foundation
 import Hypervisor
 
+@_silgen_name("sys_icache_invalidate")
+private func sysICacheInvalidate(_ start: UnsafeMutableRawPointer?, _ len: Int)
+
 // MARK: - Mapped Region
 
 /// Tracks a single region of host memory mapped into the guest physical address space.
@@ -98,6 +101,7 @@ public final class MemoryManager: @unchecked Sendable {
         data.withUnsafeBytes { src in
             hostPtr.copyMemory(from: src.baseAddress!, byteCount: data.count)
         }
+        sysICacheInvalidate(hostPtr, data.count)
 
         // Map as read-only + executable (firmware may contain code).
         let flags: hv_memory_flags_t = UInt64(HV_MEMORY_READ) | UInt64(HV_MEMORY_EXEC)
@@ -190,6 +194,18 @@ public final class MemoryManager: @unchecked Sendable {
             return
         }
         memset(start, 0, size)
+    }
+
+    /// Invalidate the host instruction cache for the memory backing a guest
+    /// physical range. This is needed when guest firmware copies executable
+    /// code into RAM and then issues cache-maintenance operations.
+    public func invalidateInstructionCache(at gpa: UInt64, size: Int) {
+        guard size > 0,
+              let start = hostPointer(for: gpa),
+              hostPointer(for: gpa + UInt64(size - 1)) != nil else {
+            return
+        }
+        sysICacheInvalidate(start, size)
     }
 
     /// Unmap all regions and free owned memory.
