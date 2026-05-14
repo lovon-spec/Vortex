@@ -290,7 +290,6 @@ public final class VirtualMachine: @unchecked Sendable {
 
     private func configureVCPUThread(_ thread: VCPUThread) {
         let cpuIndex = thread.index
-        let initialCPSR: UInt64 = config.bootExceptionLevel == 2 ? 0x3C9 : 0x3C5
 
         // Set initial register state when the vCPU is created.
         thread.onVCPUCreated = { vcpu in
@@ -306,13 +305,15 @@ public final class VirtualMachine: @unchecked Sendable {
                 // X0 = DTB address (Linux boot protocol).
                 _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, self.config.bootArgumentAddress)
 
-                // Start at the configured exception level with D/A/I/F masked.
-                _ = hv_vcpu_set_reg(vcpu, HV_REG_CPSR, initialCPSR)
+                // Start in EL1h with interrupts masked.
+                // CPSR: M[3:0]=0b0101 (EL1h), D=1, A=1, I=1, F=1
+                let cpsr: UInt64 = 0x3C5
+                _ = hv_vcpu_set_reg(vcpu, HV_REG_CPSR, cpsr)
             } else {
                 // Secondary CPUs start in a WFI loop, waiting for PSCI CPU_ON.
                 // Park them by setting PC to a tight WFI loop.
                 // We will wake them via PSCI CPU_ON.
-                _ = hv_vcpu_set_reg(vcpu, HV_REG_CPSR, initialCPSR)
+                _ = hv_vcpu_set_reg(vcpu, HV_REG_CPSR, UInt64(0x3C5))
             }
         }
 
@@ -366,11 +367,10 @@ public final class VirtualMachine: @unchecked Sendable {
                     advancePC(vcpu: vcpu)
                     return true
                 }
-                let targetCPSR: UInt64 = config.bootExceptionLevel == 2 ? 0x3C9 : 0x3C5
                 targetThread.onVCPUCreated = { vcpu in
                     _ = hv_vcpu_set_reg(vcpu, HV_REG_PC, entryPoint)
                     _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, contextID)
-                    _ = hv_vcpu_set_reg(vcpu, HV_REG_CPSR, targetCPSR)
+                    _ = hv_vcpu_set_reg(vcpu, HV_REG_CPSR, 0x3C5) // EL1h, IRQs masked
 
                     let mpidr = UInt64(cpuIndex)
                     _ = hv_vcpu_set_sys_reg(vcpu, HV_SYS_REG_MPIDR_EL1, mpidr)
