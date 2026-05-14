@@ -393,6 +393,35 @@ struct PCIBusTests {
         #expect(bus.findBARMapping(at: 0x1000_0000) == nil)
     }
 
+    @Test("BAR mapping lookup tracks guest BAR reprogramming")
+    func barMappingLookupTracksReprogramming() throws {
+        let bus = PCIBus(
+            mmio32Base: 0x2000_0000,
+            mmio32Size: 0x1000_0000,
+            mmio64Base: 0x80_0000_0000,
+            mmio64Size: 0x80_0000_0000
+        )
+
+        let device = MockPCIDevice(bars: [
+            BARInfo(index: 0, type: .memory32, size: 0x1000),
+        ])
+        try bus.addDevice(device, slot: 0)
+
+        let original = bus.barMappings[0].gpa
+        let reprogrammed: UInt64 = 0x2000_8000
+        bus.writeConfig(
+            ecamOffset: UInt64(PCIConfigOffset.bar0),
+            size: 4,
+            value: UInt32(reprogrammed)
+        )
+
+        #expect(bus.findBARMapping(at: original + 0x20) == nil)
+        let result = bus.findBARMapping(at: reprogrammed + 0x20)
+        #expect(result != nil)
+        #expect(result?.mapping.gpa == reprogrammed)
+        #expect(result?.offset == 0x20)
+    }
+
     @Test("allDevices returns devices sorted by slot then function")
     func allDevicesOrdering() throws {
         let bus = PCIBus()
@@ -450,7 +479,7 @@ struct PCIHostBridgeTests {
         #expect(val == 0xFFFF_FFFF)
     }
 
-    @Test("BAR MMIO regions are registered and route to devices")
+    @Test("BAR MMIO windows are registered and route to devices")
     func barRegionRegistration() throws {
         let bus = PCIBus(
             mmio32Base: 0x2000_0000,
@@ -470,10 +499,10 @@ struct PCIHostBridgeTests {
         ])
         try bus.addDevice(device, slot: 0)
 
-        // Register BAR regions.
+        // Register BAR windows.
         try bridge.registerBARRegions(with: addressSpace)
 
-        // Verify the BAR region can be found in the address space.
+        // Verify the BAR window can be found in the address space.
         let mapping = bus.barMappings[0]
         let found = addressSpace.findDevice(at: mapping.gpa + 0x10)
         #expect(found != nil)
@@ -511,6 +540,41 @@ struct PCIHostBridgeTests {
         #expect(device.barWrites.count == 1)
         #expect(device.barWrites[0].offset == 0x30)
         #expect(device.barWrites[0].value == 0x1234)
+    }
+
+    @Test("BAR MMIO forwarding follows guest BAR reprogramming")
+    func barMMIOForwardingAfterReprogramming() throws {
+        let bus = PCIBus(
+            mmio32Base: 0x2000_0000,
+            mmio32Size: 0x1000_0000,
+            mmio64Base: 0x80_0000_0000,
+            mmio64Size: 0x80_0000_0000
+        )
+        let bridge = PCIHostBridge(bus: bus)
+        let addressSpace = AddressSpace()
+
+        try addressSpace.registerDevice(bridge)
+
+        let device = MockPCIDevice(bars: [
+            BARInfo(index: 0, type: .memory32, size: 0x1000),
+        ])
+        try bus.addDevice(device, slot: 0)
+        try bridge.registerBARRegions(with: addressSpace)
+
+        let reprogrammed: UInt64 = 0x2000_8000
+        bridge.mmioWrite(
+            offset: UInt64(PCIConfigOffset.bar0),
+            size: 4,
+            value: reprogrammed
+        )
+
+        let readVal = addressSpace.read(at: reprogrammed + 0x40, size: 4)
+        #expect(readVal == 0xDEAD_BEEF)
+        #expect(device.barReads.last?.offset == 0x40)
+
+        addressSpace.write(at: reprogrammed + 0x44, size: 4, value: 0x5678)
+        #expect(device.barWrites.last?.offset == 0x44)
+        #expect(device.barWrites.last?.value == 0x5678)
     }
 
     @Test("resolveBAR returns correct device, bar index, and offset")

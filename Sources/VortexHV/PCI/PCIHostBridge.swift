@@ -7,8 +7,8 @@
 //    and OS enumerate PCI devices by reading/writing this region. Each device
 //    gets a 4 KiB config space page addressed by bus/device/function.
 //
-// 2. **BAR regions** -- When a device's BAR is allocated, accesses to the
-//    BAR's GPA range are forwarded to the owning PCIDeviceEmulation.
+// 2. **BAR windows** -- Accesses to PCI MMIO windows are decoded against the
+//    devices' live BAR registers and forwarded to the owning PCIDeviceEmulation.
 //
 // The host bridge registers itself as an MMIODevice for the ECAM region.
 // For BAR MMIO, it manages a set of BARMMIORegion devices, each registered
@@ -50,10 +50,9 @@ public final class PCIHostBridge: MMIODevice, @unchecked Sendable {
     /// The PCI bus this bridge manages.
     public let bus: PCIBus
 
-    /// BAR MMIO region devices registered with the address space.
-    /// One per allocated BAR.
+    /// PCI MMIO window devices registered with the address space.
     private let lock = NSLock()
-    private var barRegionDevices: [BARMMIORegion] = []
+    private var barWindowDevices: [PCIBARWindow] = []
 
     // MARK: - Initialization
 
@@ -89,29 +88,40 @@ public final class PCIHostBridge: MMIODevice, @unchecked Sendable {
 
     // MARK: - BAR MMIO Registration
 
-    /// Register MMIO regions for all allocated BARs with the address space.
+    /// Register PCI MMIO windows with the address space.
     ///
-    /// Call this after all devices have been added to the bus. Each BAR mapping
-    /// gets its own `BARMMIORegion` device registered in the address space.
+    /// Call this after all devices have been added to the bus. The windows
+    /// dispatch dynamically using the live BAR values programmed by firmware or
+    /// the guest OS, so BAR sizing and reassignment keep working after boot.
     ///
     /// - Parameter addressSpace: The guest address space to register with.
     /// - Throws: If a region overlaps an existing registration.
     public func registerBARRegions(with addressSpace: AddressSpace) throws {
-        let mappings = bus.barMappings
-
         lock.lock()
-        // Remove any previously registered BAR regions (for hot-plug or re-registration).
-        barRegionDevices.removeAll()
+        // Remove local references for hot-plug or re-registration. AddressSpace
+        // currently only supports removeAll(), and this method is called once
+        // during platform setup.
+        barWindowDevices.removeAll()
         lock.unlock()
 
-        for mapping in mappings {
-            let region = BARMMIORegion(mapping: mapping)
+        let windows = [
+            PCIBARWindow(
+                bus: bus,
+                baseAddress: MachineMemoryMap.pciMmio32Base,
+                regionSize: MachineMemoryMap.pciMmio32Size
+            ),
+            PCIBARWindow(
+                bus: bus,
+                baseAddress: MachineMemoryMap.pciMmio64Base,
+                regionSize: MachineMemoryMap.pciMmio64Size
+            ),
+        ]
 
+        for window in windows {
             lock.lock()
-            barRegionDevices.append(region)
+            barWindowDevices.append(window)
             lock.unlock()
-
-            try addressSpace.registerDevice(region)
+            try addressSpace.registerDevice(window)
         }
     }
 
@@ -125,34 +135,39 @@ public final class PCIHostBridge: MMIODevice, @unchecked Sendable {
     }
 }
 
-// MARK: - BAR MMIO Region
+// MARK: - BAR MMIO Window
 
-/// An MMIODevice that forwards reads/writes to a PCI device's BAR handler.
+/// An MMIODevice that forwards reads/writes in a PCI MMIO aperture to the
+/// device selected by the current BAR register values.
 ///
-/// One instance is created per allocated BAR and registered with the AddressSpace.
-/// When the guest accesses a GPA within this BAR, the AddressSpace dispatches
-/// to this device, which forwards to the owning PCIDeviceEmulation.
-public final class BARMMIORegion: MMIODevice, @unchecked Sendable {
+/// Firmware and operating systems commonly probe BAR sizes and then reprogram
+/// BAR bases. Routing at the window level avoids stale per-BAR address
+/// registrations after those writes.
+public final class PCIBARWindow: MMIODevice, @unchecked Sendable {
     public let baseAddress: UInt64
     public let regionSize: UInt64
 
-    /// The PCI device that owns this BAR.
-    private let device: any PCIDeviceEmulation
-    /// The BAR index on the device.
-    private let barIndex: Int
+    private let bus: PCIBus
 
-    init(mapping: BARMapping) {
-        self.baseAddress = mapping.gpa
-        self.regionSize = mapping.size
-        self.device = mapping.device
-        self.barIndex = mapping.barIndex
+    init(bus: PCIBus, baseAddress: UInt64, regionSize: UInt64) {
+        self.bus = bus
+        self.baseAddress = baseAddress
+        self.regionSize = regionSize
     }
 
     public func mmioRead(offset: UInt64, size: Int) -> UInt64 {
-        device.readBAR(bar: barIndex, offset: offset, size: size)
+        let gpa = baseAddress + offset
+        guard let (mapping, barOffset) = bus.findBARMapping(at: gpa) else {
+            return size == 8 ? UInt64.max : (UInt64(1) << UInt64(size * 8)) - 1
+        }
+        return mapping.device.readBAR(bar: mapping.barIndex, offset: barOffset, size: size)
     }
 
     public func mmioWrite(offset: UInt64, size: Int, value: UInt64) {
-        device.writeBAR(bar: barIndex, offset: offset, size: size, value: value)
+        let gpa = baseAddress + offset
+        guard let (mapping, barOffset) = bus.findBARMapping(at: gpa) else {
+            return
+        }
+        mapping.device.writeBAR(bar: mapping.barIndex, offset: barOffset, size: size, value: value)
     }
 }

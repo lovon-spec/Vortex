@@ -269,9 +269,27 @@ public final class PCIBus: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        for mapping in barMappings {
-            if gpa >= mapping.gpa && gpa < mapping.gpa + mapping.size {
-                return (mapping, gpa - mapping.gpa)
+        for device in devices.values {
+            for bar in device.bars {
+                guard bar.size > 0,
+                      bar.type != .unused,
+                      bar.type != .memory64High,
+                      let address = currentAddress(for: bar, on: device),
+                      address != 0 else {
+                    continue
+                }
+
+                if gpa >= address && gpa < address + bar.size {
+                    return (
+                        BARMapping(
+                            device: device,
+                            barIndex: bar.index,
+                            gpa: address,
+                            size: bar.size
+                        ),
+                        gpa - address
+                    )
+                }
             }
         }
         return nil
@@ -414,6 +432,27 @@ public final class PCIBus: @unchecked Sendable {
         case 1: return 0xFF
         case 2: return 0xFFFF
         default: return 0xFFFF_FFFF
+        }
+    }
+
+    private func currentAddress(for bar: BARInfo, on device: any PCIDeviceEmulation) -> UInt64? {
+        switch bar.type {
+        case .memory32:
+            let value = device.configSpace.barValue(at: bar.index)
+            return UInt64(value & 0xFFFF_FFF0)
+
+        case .memory64:
+            guard bar.index + 1 < 6 else { return nil }
+            let low = UInt64(device.configSpace.barValue(at: bar.index) & 0xFFFF_FFF0)
+            let high = UInt64(device.configSpace.barValue(at: bar.index + 1))
+            return (high << 32) | low
+
+        case .io:
+            let value = device.configSpace.barValue(at: bar.index)
+            return UInt64(value & 0xFFFF_FFFC)
+
+        case .memory64High, .unused:
+            return nil
         }
     }
 }
