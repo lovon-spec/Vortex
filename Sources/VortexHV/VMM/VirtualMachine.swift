@@ -374,8 +374,8 @@ public final class VirtualMachine: @unchecked Sendable {
             advancePC(vcpu: vcpu)
             return true
 
-        case 0x8400_0050, 0x8400_0051, 0x8400_0052, 0xC400_0053: // SMCCC TRNG calls
-            _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, UInt64(bitPattern: -1))
+        case 0x8400_0050, 0x8400_0051, 0x8400_0052, 0x8400_0053, 0xC400_0053: // SMCCC TRNG calls
+            handleTRNGCall(vcpu: vcpu, functionID: functionID, argument: x1)
             advancePC(vcpu: vcpu)
             return true
 
@@ -493,6 +493,100 @@ public final class VirtualMachine: @unchecked Sendable {
         default:
             return false
         }
+    }
+
+    private func handleTRNGCall(vcpu: hv_vcpu_t, functionID: UInt32, argument: UInt64) {
+        switch functionID {
+        case 0x8400_0050: // TRNG_VERSION
+            setSMCCCReturn(vcpu: vcpu, x0: 0x0001_0000)
+
+        case 0x8400_0051: // TRNG_FEATURES
+            let queriedFunction = UInt32(truncatingIfNeeded: argument)
+            let supported = queriedFunction == 0x8400_0050 ||
+                queriedFunction == 0x8400_0051 ||
+                queriedFunction == 0x8400_0052 ||
+                queriedFunction == 0x8400_0053 ||
+                queriedFunction == 0xC400_0053
+            setSMCCCReturn(vcpu: vcpu, x0: supported ? 0 : UInt64(bitPattern: -1))
+
+        case 0x8400_0052: // TRNG_GET_UUID
+            // 0d21e000-4384-11eb-8070-5244554e5a4c, encoded as SMCCC returns.
+            setSMCCCReturn(
+                vcpu: vcpu,
+                x0: 0x00e0_210d,
+                x1: 0xeb11_8443,
+                x2: 0x4452_7080,
+                x3: 0x4c5a_4e55
+            )
+
+        case 0x8400_0053: // TRNG_RND32
+            setTRNGRandomReturn(vcpu: vcpu, requestedBits: argument, wordBits: 32)
+
+        case 0xC400_0053: // TRNG_RND64
+            setTRNGRandomReturn(vcpu: vcpu, requestedBits: argument, wordBits: 64)
+
+        default:
+            setSMCCCReturn(vcpu: vcpu, x0: UInt64(bitPattern: -1))
+        }
+    }
+
+    private func setTRNGRandomReturn(vcpu: hv_vcpu_t, requestedBits: UInt64, wordBits: Int) {
+        let maxBits = UInt64(wordBits * 3)
+        guard requestedBits <= maxBits else {
+            setSMCCCReturn(vcpu: vcpu, x0: UInt64(bitPattern: -2))
+            return
+        }
+
+        var words = [
+            UInt64.random(in: UInt64.min...UInt64.max),
+            UInt64.random(in: UInt64.min...UInt64.max),
+            UInt64.random(in: UInt64.min...UInt64.max),
+        ]
+        clearUnusedTRNGBits(words: &words, requestedBits: requestedBits)
+
+        if wordBits == 32 {
+            setSMCCCReturn(
+                vcpu: vcpu,
+                x0: 0,
+                x1: words[1] & 0xFFFF_FFFF,
+                x2: (words[0] >> 32) & 0xFFFF_FFFF,
+                x3: words[0] & 0xFFFF_FFFF
+            )
+        } else {
+            setSMCCCReturn(vcpu: vcpu, x0: 0, x1: words[2], x2: words[1], x3: words[0])
+        }
+    }
+
+    private func clearUnusedTRNGBits(words: inout [UInt64], requestedBits: UInt64) {
+        guard requestedBits < UInt64(words.count * 64) else { return }
+        let fullWords = Int(requestedBits / 64)
+        let remainder = Int(requestedBits % 64)
+
+        if fullWords < words.count {
+            if remainder == 0 {
+                words[fullWords] = 0
+            } else {
+                words[fullWords] &= (UInt64(1) << UInt64(remainder)) - 1
+            }
+            if fullWords + 1 < words.count {
+                for index in (fullWords + 1)..<words.count {
+                    words[index] = 0
+                }
+            }
+        }
+    }
+
+    private func setSMCCCReturn(
+        vcpu: hv_vcpu_t,
+        x0: UInt64,
+        x1: UInt64 = 0,
+        x2: UInt64 = 0,
+        x3: UInt64 = 0
+    ) {
+        _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, x0)
+        _ = hv_vcpu_set_reg(vcpu, HV_REG_X1, x1)
+        _ = hv_vcpu_set_reg(vcpu, HV_REG_X2, x2)
+        _ = hv_vcpu_set_reg(vcpu, HV_REG_X3, x3)
     }
 
     private func tracePSCICall(vcpu: hv_vcpu_t, functionID: UInt32, x1: UInt64, x2: UInt64, x3: UInt64) {
