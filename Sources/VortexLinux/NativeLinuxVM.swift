@@ -209,6 +209,35 @@ public final class NativeLinuxVM: @unchecked Sendable {
             vm?.gic.setSPI(intid: intid, level: false)
         }
 
+        var usedPCISlots = Set<Int>()
+
+        @discardableResult
+        func addPCITransport(_ transport: VirtioTransport, preferredSlot: Int) throws -> Int {
+            var slot = preferredSlot
+            while usedPCISlots.contains(slot) {
+                slot += 1
+            }
+            guard slot < PCIBus.maxDevices else {
+                throw PCIError.busCapacityExceeded
+            }
+            try bus.addDevice(transport, slot: slot)
+            usedPCISlots.insert(slot)
+            let assignedSlot = slot
+            transport.onINTxLevelChanged = { [weak vm] active in
+                let line = UInt32(assignedSlot % Int(MachineIRQ.pciIntxCount))
+                vm?.gic.setSPI(intid: MachineIRQ.pciIntxBase + line, level: active)
+            }
+            return assignedSlot
+        }
+
+        // Match QEMU virt/UTM's stable PCI topology for UEFI guests. Existing
+        // UTM NVRAM boot entries commonly point the virtio-blk disk at slot 3.
+        let networkBaseSlot = 1
+        let gpuSlot = 2
+        let blockBaseSlot = 3
+        let audioBaseSlot = 6
+        let inputBaseSlot = 8
+
         for (index, disk) in configuration.storage.disks.enumerated() {
             let backend = try makeBlockBackend(for: disk)
             blockBackends.append(backend)
@@ -223,11 +252,7 @@ public final class NativeLinuxVM: @unchecked Sendable {
             )
             transport.attachGuestMemory(memory)
 
-            let slot = try bus.addDevice(transport)
-            transport.onINTxLevelChanged = { [weak vm] active in
-                let line = UInt32(slot % Int(MachineIRQ.pciIntxCount))
-                vm?.gic.setSPI(intid: MachineIRQ.pciIntxBase + line, level: active)
-            }
+            try addPCITransport(transport, preferredSlot: blockBaseSlot + index)
             pciTransports.append(transport)
         }
 
@@ -253,11 +278,7 @@ public final class NativeLinuxVM: @unchecked Sendable {
             )
             transport.attachGuestMemory(memory)
 
-            let slot = try bus.addDevice(transport)
-            transport.onINTxLevelChanged = { [weak vm] active in
-                let line = UInt32(slot % Int(MachineIRQ.pciIntxCount))
-                vm?.gic.setSPI(intid: MachineIRQ.pciIntxBase + line, level: active)
-            }
+            try addPCITransport(transport, preferredSlot: networkBaseSlot + index)
             pciTransports.append(transport)
         }
 
@@ -273,11 +294,7 @@ public final class NativeLinuxVM: @unchecked Sendable {
             )
             transport.attachGuestMemory(memory)
 
-            let slot = try bus.addDevice(transport)
-            transport.onINTxLevelChanged = { [weak vm] active in
-                let line = UInt32(slot % Int(MachineIRQ.pciIntxCount))
-                vm?.gic.setSPI(intid: MachineIRQ.pciIntxBase + line, level: active)
-            }
+            try addPCITransport(transport, preferredSlot: audioBaseSlot)
             pciTransports.append(transport)
             self.audioRouter = audioRouter
         }
@@ -288,11 +305,7 @@ public final class NativeLinuxVM: @unchecked Sendable {
             msiController: vm.gic.msiController
         )
         keyboardTransport.attachGuestMemory(memory)
-        let keyboardSlot = try bus.addDevice(keyboardTransport)
-        keyboardTransport.onINTxLevelChanged = { [weak vm] active in
-            let line = UInt32(keyboardSlot % Int(MachineIRQ.pciIntxCount))
-            vm?.gic.setSPI(intid: MachineIRQ.pciIntxBase + line, level: active)
-        }
+        try addPCITransport(keyboardTransport, preferredSlot: inputBaseSlot)
         pciTransports.append(keyboardTransport)
         self.keyboardInput = keyboardInput
 
@@ -305,11 +318,7 @@ public final class NativeLinuxVM: @unchecked Sendable {
             msiController: vm.gic.msiController
         )
         tabletTransport.attachGuestMemory(memory)
-        let tabletSlot = try bus.addDevice(tabletTransport)
-        tabletTransport.onINTxLevelChanged = { [weak vm] active in
-            let line = UInt32(tabletSlot % Int(MachineIRQ.pciIntxCount))
-            vm?.gic.setSPI(intid: MachineIRQ.pciIntxBase + line, level: active)
-        }
+        try addPCITransport(tabletTransport, preferredSlot: inputBaseSlot + 1)
         pciTransports.append(tabletTransport)
         self.tabletInput = tabletInput
 
@@ -329,11 +338,7 @@ public final class NativeLinuxVM: @unchecked Sendable {
             msiController: vm.gic.msiController
         )
         gpuTransport.attachGuestMemory(memory)
-        let gpuSlot = try bus.addDevice(gpuTransport)
-        gpuTransport.onINTxLevelChanged = { [weak vm] active in
-            let line = UInt32(gpuSlot % Int(MachineIRQ.pciIntxCount))
-            vm?.gic.setSPI(intid: MachineIRQ.pciIntxBase + line, level: active)
-        }
+        try addPCITransport(gpuTransport, preferredSlot: gpuSlot)
         pciTransports.append(gpuTransport)
         self.gpu = gpu
 
