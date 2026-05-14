@@ -290,12 +290,14 @@ public final class VirtualMachine: @unchecked Sendable {
 
     private func configureVCPUThread(_ thread: VCPUThread) {
         let cpuIndex = thread.index
+        let initialStackPointer = MachineMemoryMap.ramBase - 16
 
         // Set initial register state when the vCPU is created.
         thread.onVCPUCreated = { vcpu in
             // Set MPIDR_EL1 for GIC affinity routing.
             let mpidr = UInt64(cpuIndex) // Aff0 = cpuIndex
             _ = hv_vcpu_set_sys_reg(vcpu, HV_SYS_REG_MPIDR_EL1, mpidr)
+            _ = hv_vcpu_set_sys_reg(vcpu, HV_SYS_REG_SP_EL1, initialStackPointer)
 
             // Primary CPU (index 0) gets the boot configuration.
             if cpuIndex == 0 {
