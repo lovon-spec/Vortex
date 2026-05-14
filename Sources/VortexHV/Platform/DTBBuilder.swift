@@ -444,7 +444,7 @@ public final class DTBBuilder {
             ptr.storeBytes(of: totalSize.bigEndian, toByteOffset: 4, as: UInt32.self)
             ptr.storeBytes(of: structOffset.bigEndian, toByteOffset: 8, as: UInt32.self)
             ptr.storeBytes(of: stringsOffset.bigEndian, toByteOffset: 12, as: UInt32.self)
-            ptr.storeBytes(of: structOffset.bigEndian, toByteOffset: 16, as: UInt32.self) // off_mem_rsvmap
+            ptr.storeBytes(of: headerSize.bigEndian, toByteOffset: 16, as: UInt32.self) // off_mem_rsvmap
             ptr.storeBytes(of: FDT_VERSION.bigEndian, toByteOffset: 20, as: UInt32.self)
             ptr.storeBytes(of: FDT_LAST_COMP_VERSION.bigEndian, toByteOffset: 24, as: UInt32.self)
             ptr.storeBytes(of: UInt32(0).bigEndian, toByteOffset: 28, as: UInt32.self) // boot_cpuid_phys
