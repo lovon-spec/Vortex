@@ -61,6 +61,9 @@ public final class VirtualMachine: @unchecked Sendable {
     /// Whether the HV VM has been created.
     private var vmCreated = false
 
+    /// Emit PSCI calls to stderr when debugging early firmware bring-up.
+    private let tracePSCI = ProcessInfo.processInfo.environment["VORTEX_HV_TRACE_PSCI"] == "1"
+
     // MARK: - Initialization
 
     /// Create a new virtual machine.
@@ -350,8 +353,15 @@ public final class VirtualMachine: @unchecked Sendable {
     /// PSCI function IDs follow the ARM PSCI v1.0 specification.
     private func handlePSCI(vcpu: hv_vcpu_t, info: HypercallInfo) -> Bool {
         var x0: UInt64 = 0
+        var x1: UInt64 = 0
+        var x2: UInt64 = 0
+        var x3: UInt64 = 0
         _ = hv_vcpu_get_reg(vcpu, HV_REG_X0, &x0)
+        _ = hv_vcpu_get_reg(vcpu, HV_REG_X1, &x1)
+        _ = hv_vcpu_get_reg(vcpu, HV_REG_X2, &x2)
+        _ = hv_vcpu_get_reg(vcpu, HV_REG_X3, &x3)
         let functionID = UInt32(truncatingIfNeeded: x0)
+        tracePSCICall(functionID: functionID, x1: x1, x2: x2, x3: x3)
 
         switch functionID {
         case 0x8400_0000: // PSCI_VERSION
@@ -361,12 +371,9 @@ public final class VirtualMachine: @unchecked Sendable {
             return true
 
         case 0xC400_0003, 0x8400_0003: // PSCI_CPU_ON (64-bit / 32-bit)
-            var targetCPU: UInt64 = 0
-            var entryPoint: UInt64 = 0
-            var contextID: UInt64 = 0
-            _ = hv_vcpu_get_reg(vcpu, HV_REG_X1, &targetCPU)
-            _ = hv_vcpu_get_reg(vcpu, HV_REG_X2, &entryPoint)
-            _ = hv_vcpu_get_reg(vcpu, HV_REG_X3, &contextID)
+            let targetCPU = x1
+            let entryPoint = x2
+            let contextID = x3
 
             let cpuIndex = Int(targetCPU & 0xFF) // Aff0 is the CPU index
             if cpuIndex < vcpuThreads.count {
@@ -429,8 +436,6 @@ public final class VirtualMachine: @unchecked Sendable {
             return false // Exit the run loop for this vCPU
 
         case 0x8400_000A: // PSCI_FEATURES
-            var featureFunctionID: UInt64 = 0
-            _ = hv_vcpu_get_reg(vcpu, HV_REG_X1, &featureFunctionID)
             // We support all the basic PSCI functions.
             _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, 0) // Supported
             advancePC(vcpu: vcpu)
@@ -442,6 +447,18 @@ public final class VirtualMachine: @unchecked Sendable {
             advancePC(vcpu: vcpu)
             return true
         }
+    }
+
+    private func tracePSCICall(functionID: UInt32, x1: UInt64, x2: UInt64, x3: UInt64) {
+        guard tracePSCI else { return }
+        let line = String(
+            format: "[psci] fn=0x%08x x1=0x%llx x2=0x%llx x3=0x%llx\n",
+            functionID,
+            x1,
+            x2,
+            x3
+        )
+        FileHandle.standardError.write(Data(line.utf8))
     }
 
     private func advancePC(vcpu: hv_vcpu_t) {
