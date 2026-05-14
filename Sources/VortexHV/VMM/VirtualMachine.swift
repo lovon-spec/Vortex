@@ -364,6 +364,21 @@ public final class VirtualMachine: @unchecked Sendable {
         tracePSCICall(functionID: functionID, x1: x1, x2: x2, x3: x3)
 
         switch functionID {
+        case 0x8000_0000: // SMCCC_VERSION
+            _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, 0x0001_0001) // SMCCC v1.1
+            advancePC(vcpu: vcpu)
+            return true
+
+        case 0x8000_0001: // SMCCC_ARCH_FEATURES
+            _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, smcccFeatureSupported(UInt32(truncatingIfNeeded: x1)) ? 0 : UInt64(bitPattern: -1))
+            advancePC(vcpu: vcpu)
+            return true
+
+        case 0x8400_0050, 0x8400_0051, 0x8400_0052, 0xC400_0053: // SMCCC TRNG calls
+            _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, UInt64(bitPattern: -1))
+            advancePC(vcpu: vcpu)
+            return true
+
         case 0x8400_0000: // PSCI_VERSION
             // Return PSCI v1.0
             _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, 0x0001_0000)
@@ -436,8 +451,14 @@ public final class VirtualMachine: @unchecked Sendable {
             return false // Exit the run loop for this vCPU
 
         case 0x8400_000A: // PSCI_FEATURES
-            // We support all the basic PSCI functions.
-            _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, 0) // Supported
+            let featureFunctionID = UInt32(truncatingIfNeeded: x1)
+            _ = hv_vcpu_set_reg(
+                vcpu,
+                HV_REG_X0,
+                psciFeatureSupported(featureFunctionID) || smcccFeatureSupported(featureFunctionID)
+                    ? 0
+                    : UInt64(bitPattern: -1)
+            )
             advancePC(vcpu: vcpu)
             return true
 
@@ -446,6 +467,31 @@ public final class VirtualMachine: @unchecked Sendable {
             _ = hv_vcpu_set_reg(vcpu, HV_REG_X0, UInt64(bitPattern: -1))
             advancePC(vcpu: vcpu)
             return true
+        }
+    }
+
+    private func psciFeatureSupported(_ functionID: UInt32) -> Bool {
+        switch functionID {
+        case 0x8400_0000,             // PSCI_VERSION
+             0x8400_0001,             // PSCI_CPU_SUSPEND
+             0x8400_0002,             // PSCI_CPU_OFF
+             0x8400_0003, 0xC400_0003, // PSCI_CPU_ON
+             0x8400_0008,             // PSCI_SYSTEM_OFF
+             0x8400_0009,             // PSCI_SYSTEM_RESET
+             0x8400_000A:             // PSCI_FEATURES
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func smcccFeatureSupported(_ functionID: UInt32) -> Bool {
+        switch functionID {
+        case 0x8000_0000,             // SMCCC_VERSION
+             0x8000_0001:             // SMCCC_ARCH_FEATURES
+            return true
+        default:
+            return false
         }
     }
 
