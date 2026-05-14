@@ -158,8 +158,13 @@ public final class VCPUExitHandler: @unchecked Sendable {
         // Check ISV (Instruction Syndrome Valid) -- if not set, we can't decode the access.
         let issValid = (iss & (1 << 24)) != 0
         guard issValid else {
+            if (iss & ESR.issCMBit) != 0 {
+                let instrLen = ESR.is32BitInstruction(syndrome) ? 4 : 2
+                advancePC(vcpu: vcpu, instructionLength: instrLen)
+                return true
+            }
             let pc = getRegister(vcpu: vcpu, reg: HV_REG_PC)
-            VortexLog.hv.error("Data abort with ISV=0 at PC=0x\(String(pc, radix: 16)) -- cannot decode MMIO")
+            VortexLog.hv.error("Data abort with ISV=0 at PC=0x\(String(pc, radix: 16), privacy: .public), ESR=0x\(String(syndrome, radix: 16), privacy: .public), IPA=0x\(String(exit.exception.physical_address, radix: 16), privacy: .public) -- cannot decode MMIO")
             return false
         }
 
