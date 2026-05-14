@@ -147,7 +147,12 @@ public final class VCPUExitHandler: @unchecked Sendable {
 
         case ESR.ecInstrAbort:
             let pc = getRegister(vcpu: vcpu, reg: HV_REG_PC)
-            VortexLog.hv.error("Instruction abort at PC=0x\(String(pc, radix: 16), privacy: .public), ESR=0x\(String(syndrome, radix: 16), privacy: .public), IPA=0x\(String(exit.exception.physical_address, radix: 16), privacy: .public)")
+            let ttbr0 = getSystemRegister(vcpu: vcpu, reg: HV_SYS_REG_TTBR0_EL1)
+            let ttbr1 = getSystemRegister(vcpu: vcpu, reg: HV_SYS_REG_TTBR1_EL1)
+            let tcr = getSystemRegister(vcpu: vcpu, reg: HV_SYS_REG_TCR_EL1)
+            let sctlr = getSystemRegister(vcpu: vcpu, reg: HV_SYS_REG_SCTLR_EL1)
+            let mair = getSystemRegister(vcpu: vcpu, reg: HV_SYS_REG_MAIR_EL1)
+            VortexLog.hv.error("Instruction abort at PC=0x\(String(pc, radix: 16), privacy: .public), ESR=0x\(String(syndrome, radix: 16), privacy: .public), IPA=0x\(String(exit.exception.physical_address, radix: 16), privacy: .public), TTBR0=0x\(String(ttbr0, radix: 16), privacy: .public), TTBR1=0x\(String(ttbr1, radix: 16), privacy: .public), TCR=0x\(String(tcr, radix: 16), privacy: .public), SCTLR=0x\(String(sctlr, radix: 16), privacy: .public), MAIR=0x\(String(mair, radix: 16), privacy: .public)")
             return false
 
         default:
@@ -321,6 +326,12 @@ public final class VCPUExitHandler: @unchecked Sendable {
     private func getRegister(vcpu: hv_vcpu_t, reg: hv_reg_t) -> UInt64 {
         var value: UInt64 = 0
         _ = hv_vcpu_get_reg(vcpu, reg, &value)
+        return value
+    }
+
+    private func getSystemRegister(vcpu: hv_vcpu_t, reg: hv_sys_reg_t) -> UInt64 {
+        var value: UInt64 = 0
+        _ = hv_vcpu_get_sys_reg(vcpu, reg, &value)
         return value
     }
 
