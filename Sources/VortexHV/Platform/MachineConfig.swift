@@ -21,6 +21,9 @@ public struct VMConfig: Sendable {
     public var entryPoint: UInt64
     /// Initial X0 value for the boot CPU. Linux and UEFI receive the DTB address here.
     public var bootArgumentAddress: UInt64
+    /// Initial exception level for the boot CPU. Direct Linux uses EL1;
+    /// QEMU virt-compatible UEFI firmware expects EL2 to be available.
+    public var bootExceptionLevel: UInt8
     /// Guest OS type hint.
     public var guestOS: GuestOSHint
 
@@ -38,6 +41,7 @@ public struct VMConfig: Sendable {
         bootArgs: String = "",
         entryPoint: UInt64 = MachineMemoryMap.kernelLoadAddress,
         bootArgumentAddress: UInt64 = MachineMemoryMap.dtbAddress,
+        bootExceptionLevel: UInt8 = 1,
         guestOS: GuestOSHint = .linux
     ) {
         self.cpuCount = cpuCount
@@ -47,6 +51,7 @@ public struct VMConfig: Sendable {
         self.bootArgs = bootArgs
         self.entryPoint = entryPoint
         self.bootArgumentAddress = bootArgumentAddress
+        self.bootExceptionLevel = bootExceptionLevel
         self.guestOS = guestOS
     }
 }

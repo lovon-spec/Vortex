@@ -68,6 +68,7 @@ public final class NativeLinuxVM: @unchecked Sendable {
             initrdPath: configuration.bootConfig.initrdPath,
             bootArgs: configuration.bootConfig.kernelCommandLine ?? "",
             entryPoint: Self.entryPoint(for: configuration.bootConfig),
+            bootExceptionLevel: configuration.bootConfig.mode == .uefi ? 2 : 1,
             guestOS: .linux
         ))
 
