@@ -56,6 +56,7 @@ public final class NativeLinuxVM: @unchecked Sendable {
     private var audioRouter: VortexAudio.AudioRouter?
     private var keyboardInput: VirtioInputDevice?
     private var tabletInput: VirtioInputDevice?
+    private var entropyDevice: VirtioEntropyDevice?
 
     public init(configuration: VMConfiguration) throws {
         self.configuration = configuration
@@ -197,6 +198,21 @@ public final class NativeLinuxVM: @unchecked Sendable {
             try vm.addDevice(transport)
             virtioTransports.append(transport)
         }
+
+        let entropy = VirtioEntropyDevice()
+        let entropyIndex = configuration.storage.disks.count
+        let entropyBase = MachineMemoryMap.virtioMMIOBase
+            + UInt64(entropyIndex) * MachineMemoryMap.virtioMMIODeviceStride
+        let entropyIRQ = MachineIRQ.virtioMMIOBase + UInt32(entropyIndex)
+        let entropyTransport = VirtioMMIOTransport(device: entropy, baseAddress: entropyBase)
+        entropyTransport.attachGuestMemory(memory)
+        entropyTransport.onInterruptStateChanged = { [weak vm] active in
+            vm?.gic.setSPI(intid: entropyIRQ, level: active)
+        }
+
+        try vm.addDevice(entropyTransport)
+        virtioTransports.append(entropyTransport)
+        self.entropyDevice = entropy
     }
 
     private func configurePCIVirtioDevices(memory: HVGuestMemoryAccessor) throws {
@@ -235,6 +251,7 @@ public final class NativeLinuxVM: @unchecked Sendable {
         let networkBaseSlot = 1
         let gpuSlot = 2
         let blockBaseSlot = 3
+        let entropySlot = 4
         let audioBaseSlot = 6
         let inputBaseSlot = 8
         var blockBootPaths: [String] = []
@@ -261,6 +278,16 @@ public final class NativeLinuxVM: @unchecked Sendable {
         if !blockBootPaths.isEmpty {
             vm.fwCfg.addQEMUBootOrder(paths: blockBootPaths)
         }
+
+        let entropy = VirtioEntropyDevice()
+        let entropyTransport = VirtioTransport(
+            device: entropy,
+            msiController: vm.gic.msiController
+        )
+        entropyTransport.attachGuestMemory(memory)
+        try addPCITransport(entropyTransport, preferredSlot: entropySlot)
+        pciTransports.append(entropyTransport)
+        self.entropyDevice = entropy
 
         for (index, interface) in configuration.network.interfaces.enumerated() {
             let macAddress = Self.macAddressBytes(
@@ -483,7 +510,7 @@ public final class NativeLinuxVM: @unchecked Sendable {
             bootArgs: configuration.bootConfig.kernelCommandLine,
             initrdStart: initrdStart,
             initrdEnd: initrdEnd,
-            virtioMMIODeviceCount: usesPCIVirtio ? 0 : configuration.storage.disks.count,
+            virtioMMIODeviceCount: usesPCIVirtio ? 0 : virtioMMIODeviceCount,
             includePCIHostBridge: usesPCIVirtio
         )
     }
@@ -531,10 +558,14 @@ public final class NativeLinuxVM: @unchecked Sendable {
         _ = vm.loadDTB(
             bootArgs: "",
             at: MachineMemoryMap.uefiDTBAddress,
-            virtioMMIODeviceCount: usesPCIVirtio ? 0 : configuration.storage.disks.count,
+            virtioMMIODeviceCount: usesPCIVirtio ? 0 : virtioMMIODeviceCount,
             includePCIHostBridge: usesPCIVirtio,
             includeFirmwareDevices: true
         )
+    }
+
+    private var virtioMMIODeviceCount: Int {
+        configuration.storage.disks.count + 1
     }
 
     private static func pflashBankData(from path: String) throws -> Data {
