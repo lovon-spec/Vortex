@@ -53,6 +53,7 @@ public final class DTBBuilder {
     private let virtioMMIOStride: UInt64
     private let virtioMMIOIRQBase: UInt32
     private let includePCIHostBridge: Bool
+    private let includeFirmwareDevices: Bool
     private let initrdStart: UInt64?
     private let initrdEnd: UInt64?
 
@@ -79,6 +80,7 @@ public final class DTBBuilder {
         virtioMMIOStride: UInt64 = MachineMemoryMap.virtioMMIODeviceStride,
         virtioMMIOIRQBase: UInt32 = MachineIRQ.virtioMMIOBase,
         includePCIHostBridge: Bool = false,
+        includeFirmwareDevices: Bool = false,
         initrdStart: UInt64? = nil,
         initrdEnd: UInt64? = nil
     ) {
@@ -99,6 +101,7 @@ public final class DTBBuilder {
         self.virtioMMIOStride = virtioMMIOStride
         self.virtioMMIOIRQBase = virtioMMIOIRQBase
         self.includePCIHostBridge = includePCIHostBridge
+        self.includeFirmwareDevices = includeFirmwareDevices
         self.initrdStart = initrdStart
         self.initrdEnd = initrdEnd
     }
@@ -144,6 +147,9 @@ public final class DTBBuilder {
 
         // -- RTC node --
         buildRTCNode()
+
+        // -- QEMU firmware platform devices --
+        buildFirmwareDeviceNodes()
 
         // -- virtio-mmio devices --
         buildVirtioMMIONodes()
@@ -256,6 +262,26 @@ public final class DTBBuilder {
         addProperty("interrupts", u32Array: [0, spiNumber, 4])
         addProperty("clock-names", stringList: ["apb_pclk"])
         addProperty("clocks", u32Array: [0x1800_0000])
+        endNode()
+    }
+
+    private func buildFirmwareDeviceNodes() {
+        guard includeFirmwareDevices else { return }
+
+        beginNode("flash@0")
+        addProperty("compatible", stringList: ["cfi-flash"])
+        addProperty("bank-width", u32: 4)
+        addProperty("reg", data: encodeU64Array([
+            MachineMemoryMap.flashBase,
+            MachineMemoryMap.flashBankSize,
+            MachineMemoryMap.flashBase + MachineMemoryMap.flashBankSize,
+            MachineMemoryMap.flashBankSize,
+        ]))
+        endNode()
+
+        beginNode("fw-cfg@\(String(MachineMemoryMap.fwCfgBase, radix: 16))")
+        addProperty("compatible", stringList: ["qemu,fw-cfg-mmio"])
+        addProperty("reg", u64Pair: (MachineMemoryMap.fwCfgBase, 0x18))
         endNode()
     }
 

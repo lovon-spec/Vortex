@@ -521,7 +521,8 @@ public final class NativeLinuxVM: @unchecked Sendable {
             bootArgs: "",
             at: MachineMemoryMap.uefiDTBAddress,
             virtioMMIODeviceCount: usesPCIVirtio ? 0 : configuration.storage.disks.count,
-            includePCIHostBridge: usesPCIVirtio
+            includePCIHostBridge: usesPCIVirtio,
+            includeFirmwareDevices: true
         )
     }
 

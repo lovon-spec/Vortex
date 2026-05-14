@@ -64,9 +64,6 @@ public final class VirtualMachine: @unchecked Sendable {
     /// Emit PSCI calls to stderr when debugging early firmware bring-up.
     private let tracePSCI = ProcessInfo.processInfo.environment["VORTEX_HV_TRACE_PSCI"] == "1"
 
-    /// Diagnostic switch for validating Hypervisor.framework HVC PC semantics.
-    private let skipFirmwareCallPCAdvance = ProcessInfo.processInfo.environment["VORTEX_HV_SKIP_HVC_PC_ADVANCE"] == "1"
-
     // MARK: - Initialization
 
     /// Create a new virtual machine.
@@ -157,7 +154,8 @@ public final class VirtualMachine: @unchecked Sendable {
         initrdStart: UInt64? = nil,
         initrdEnd: UInt64? = nil,
         virtioMMIODeviceCount: Int = 0,
-        includePCIHostBridge: Bool = false
+        includePCIHostBridge: Bool = false,
+        includeFirmwareDevices: Bool = false
     ) -> (gpa: UInt64, size: Int) {
         let builder = DTBBuilder(
             cpuCount: config.cpuCount,
@@ -166,6 +164,7 @@ public final class VirtualMachine: @unchecked Sendable {
             bootArgs: bootArgs ?? config.bootArgs,
             virtioMMIODeviceCount: virtioMMIODeviceCount,
             includePCIHostBridge: includePCIHostBridge,
+            includeFirmwareDevices: includeFirmwareDevices,
             initrdStart: initrdStart,
             initrdEnd: initrdEnd
         )
@@ -614,10 +613,9 @@ public final class VirtualMachine: @unchecked Sendable {
     }
 
     private func advanceFirmwareCallPC(vcpu: hv_vcpu_t) {
-        guard !skipFirmwareCallPCAdvance else { return }
-        var pc: UInt64 = 0
-        _ = hv_vcpu_get_reg(vcpu, HV_REG_PC, &pc)
-        _ = hv_vcpu_set_reg(vcpu, HV_REG_PC, pc &+ 4)
+        // Hypervisor.framework reports HVC/SMC exits with PC already advanced
+        // past the trapping instruction. Data abort and WFI exits still use
+        // explicit PC advancement in VCPUExitHandler.
     }
 }
 
