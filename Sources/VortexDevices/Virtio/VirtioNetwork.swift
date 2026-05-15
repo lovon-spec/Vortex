@@ -28,7 +28,9 @@ public enum NetworkPacketBackendError: Error, CustomStringConvertible {
 }
 
 private enum VirtioNetFeature {
+    static let mtu: UInt64 = 1 << 3
     static let mac: UInt64 = 1 << 5
+    static let mergeableRxBuffers: UInt64 = 1 << 15
     static let status: UInt64 = 1 << 16
 }
 
@@ -46,7 +48,8 @@ private enum VirtioNetConfigOffset {
     static let size = 12
 }
 
-private let virtioNetHeaderSize = 10
+private let virtioNetBaseHeaderSize = 10
+private let virtioNetMergeableRxHeaderSize = 12
 
 /// Minimal modern virtio-net device backed by a host packet source.
 ///
@@ -76,7 +79,10 @@ public final class VirtioNetworkDevice: VirtioDeviceBase, @unchecked Sendable {
         super.init(
             deviceType: .network,
             numQueues: VirtioNetQueue.count,
-            deviceFeatures: VirtioNetFeature.mac | VirtioNetFeature.status,
+            deviceFeatures: VirtioNetFeature.mtu
+                | VirtioNetFeature.mac
+                | VirtioNetFeature.mergeableRxBuffers
+                | VirtioNetFeature.status,
             configSize: VirtioNetConfigOffset.size,
             defaultQueueSize: 256
         )
@@ -150,11 +156,12 @@ public final class VirtioNetworkDevice: VirtioDeviceBase, @unchecked Sendable {
 
     private func processTransmitQueueLocked() {
         let txQueue = queues[VirtioNetQueue.transmit]
+        let headerSize = virtioNetHeaderSizeLocked()
 
         while let chain = txQueue.nextAvailableChain() {
             let request = readReadableData(from: chain)
-            if request.count >= virtioNetHeaderSize {
-                let packet = request.dropFirst(virtioNetHeaderSize)
+            if request.count >= headerSize {
+                let packet = request.dropFirst(headerSize)
                 if !packet.isEmpty {
                     do {
                         try backend.send(packet: Data(packet))
@@ -170,11 +177,12 @@ public final class VirtioNetworkDevice: VirtioDeviceBase, @unchecked Sendable {
 
     private func drainReceiveQueueLocked() {
         let rxQueue = queues[VirtioNetQueue.receive]
+        let header = receiveHeaderLocked()
 
         while !pendingReceivePackets.isEmpty,
               let chain = rxQueue.nextAvailableChain() {
             let packet = pendingReceivePackets.removeFirst()
-            let payload = Data(repeating: 0, count: virtioNetHeaderSize) + packet
+            let payload = header + packet
             let written = writeWritableData(payload, to: chain)
             rxQueue.addUsed(headIndex: chain.headIndex, length: UInt32(written))
             signalUsedBuffers(queueIndex: VirtioNetQueue.receive)
@@ -217,8 +225,28 @@ public final class VirtioNetworkDevice: VirtioDeviceBase, @unchecked Sendable {
         return bytes
     }
 
+    private func virtioNetHeaderSizeLocked() -> Int {
+        (driverFeatures & VirtioNetFeature.mergeableRxBuffers) != 0
+            ? virtioNetMergeableRxHeaderSize
+            : virtioNetBaseHeaderSize
+    }
+
+    private func receiveHeaderLocked() -> Data {
+        var header = Data(repeating: 0, count: virtioNetHeaderSizeLocked())
+        if header.count >= virtioNetMergeableRxHeaderSize {
+            storeLE(UInt16(1), into: &header, at: virtioNetBaseHeaderSize)
+        }
+        return header
+    }
+
     private func storeLE(_ value: UInt16, into bytes: inout [UInt8], at offset: Int) {
         bytes[offset] = UInt8(value & 0x00ff)
         bytes[offset + 1] = UInt8((value >> 8) & 0x00ff)
+    }
+
+    private func storeLE(_ value: UInt16, into data: inout Data, at offset: Int) {
+        guard offset >= 0, offset + 2 <= data.count else { return }
+        data[offset] = UInt8(value & 0x00ff)
+        data[offset + 1] = UInt8((value >> 8) & 0x00ff)
     }
 }
