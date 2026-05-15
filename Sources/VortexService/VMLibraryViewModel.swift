@@ -200,9 +200,13 @@ public final class VMLibraryViewModel {
                 && !controller.isRunning
                 && !controller.isPaused
                 && !controller.isStarting {
-                await controller.stop()
-                controller.releaseOwnerLock()
-                runningControllers.removeValue(forKey: id)
+                let didStop = await controller.stop()
+                if didStop {
+                    controller.releaseOwnerLock()
+                    if runningControllers[id] === controller {
+                        runningControllers.removeValue(forKey: id)
+                    }
+                }
             }
         } catch {
             errorMessage = "Failed to boot VM: \(error.localizedDescription)"
@@ -212,9 +216,15 @@ public final class VMLibraryViewModel {
     /// Stops a running VM and removes its controller.
     public func stopVM(id: UUID) async {
         guard let controller = runningControllers[id] else { return }
-        await controller.stop()
+        let didStop = await controller.stop()
+        guard didStop else {
+            errorMessage = controller.errorMessage
+            return
+        }
         controller.releaseOwnerLock()
-        runningControllers.removeValue(forKey: id)
+        if runningControllers[id] === controller {
+            runningControllers.removeValue(forKey: id)
+        }
     }
 
     /// Removes the controller for a VM that has already stopped.

@@ -25,11 +25,12 @@ struct VMDisplayWindow: View {
     @State private var isPrimaryDisplayWindow: Bool?
 
     var body: some View {
+        let activeController = viewModel.controller(for: vmID) ?? controller
         Group {
             if isPrimaryDisplayWindow == false {
                 Color.clear
                     .frame(width: 1, height: 1)
-            } else if let controller = controller {
+            } else if let controller = activeController {
                 VMDisplayContent(controller: controller)
             } else if let error = bootError {
                 VMBootErrorView(message: error)
@@ -45,6 +46,11 @@ struct VMDisplayWindow: View {
         .task(id: isPrimaryDisplayWindow) {
             guard isPrimaryDisplayWindow == true else { return }
             await attachController()
+        }
+        .onChange(of: viewModel.controller(for: vmID)?.config.identity.name) { _, name in
+            if let name {
+                registeredWindow?.title = name
+            }
         }
         .onDisappear {
             if let registeredWindow {
@@ -270,10 +276,20 @@ private final class NativeLinuxFramebufferNSView: NSView {
     private var image: CGImage?
     private var trackingAreaRef: NSTrackingArea?
     private var modifierStates: [UInt16: Bool] = [:]
+    private var pressedMacKeyCodes: [UInt16: UInt16] = [:]
     private var pressedLinuxKeys: Set<UInt16> = []
+    private var observedWindow: NSWindow?
+    private var inputReleaseObservers: [NSObjectProtocol] = []
+    private var keyUpMonitor: Any?
 
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { true }
+
+    deinit {
+        releaseAllKeys()
+        removeInputReleaseObservers()
+        removeKeyUpMonitor()
+    }
 
     func update(framebuffer: NativeLinuxFramebuffer, controller: VMController) {
         self.controller = controller
@@ -285,7 +301,28 @@ private final class NativeLinuxFramebufferNSView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.acceptsMouseMovedEvents = true
+        if let window {
+            installInputReleaseObservers(for: window)
+            installKeyUpMonitor()
+        } else {
+            releaseAllKeys()
+            removeInputReleaseObservers()
+            removeKeyUpMonitor()
+        }
         claimInputFocusSoon()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow !== window {
+            releaseAllKeys()
+            removeInputReleaseObservers()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidHide() {
+        releaseAllKeys()
+        super.viewDidHide()
     }
 
     override func resignFirstResponder() -> Bool {
@@ -385,14 +422,14 @@ private final class NativeLinuxFramebufferNSView: NSView {
               let code = NativeLinuxKeyMap.linuxCode(forMacKeyCode: event.keyCode) else {
             return
         }
-        sendKey(code: code, pressed: true)
+        sendKey(code: code, macKeyCode: event.keyCode, pressed: true)
     }
 
     override func keyUp(with event: NSEvent) {
         guard let code = NativeLinuxKeyMap.linuxCode(forMacKeyCode: event.keyCode) else {
             return
         }
-        sendKey(code: code, pressed: false)
+        sendKey(code: code, macKeyCode: event.keyCode, pressed: false)
     }
 
     override func flagsChanged(with event: NSEvent) {
@@ -401,14 +438,14 @@ private final class NativeLinuxFramebufferNSView: NSView {
         }
 
         if event.keyCode == NativeLinuxKeyMap.capsLockMacKeyCode {
-            sendKey(code: code, pressed: true)
-            sendKey(code: code, pressed: false)
+            sendKey(code: code, macKeyCode: event.keyCode, pressed: true)
+            sendKey(code: code, macKeyCode: event.keyCode, pressed: false)
             return
         }
 
         let pressed = !(modifierStates[event.keyCode] ?? false)
         modifierStates[event.keyCode] = pressed
-        sendKey(code: code, pressed: pressed)
+        sendKey(code: code, macKeyCode: event.keyCode, pressed: pressed)
     }
 
     private func sendPointerEvent(_ event: NSEvent) {
@@ -427,23 +464,99 @@ private final class NativeLinuxFramebufferNSView: NSView {
         )
     }
 
-    private func sendKey(code: UInt16, pressed: Bool) {
+    private func sendKey(code: UInt16, macKeyCode: UInt16?, pressed: Bool) {
         if pressed {
             guard pressedLinuxKeys.insert(code).inserted else {
                 return
             }
+            if let macKeyCode {
+                pressedMacKeyCodes[macKeyCode] = code
+            }
         } else {
             pressedLinuxKeys.remove(code)
+            if let macKeyCode {
+                pressedMacKeyCodes.removeValue(forKey: macKeyCode)
+            }
         }
         controller?.sendNativeKey(code: code, pressed: pressed)
     }
 
     private func releaseAllKeys() {
-        for code in pressedLinuxKeys {
+        let codes = pressedLinuxKeys
+        pressedLinuxKeys.removeAll()
+        pressedMacKeyCodes.removeAll()
+        modifierStates.removeAll()
+
+        for code in codes {
             controller?.sendNativeKey(code: code, pressed: false)
         }
-        pressedLinuxKeys.removeAll()
-        modifierStates.removeAll()
+    }
+
+    private func installInputReleaseObservers(for window: NSWindow) {
+        guard observedWindow !== window else {
+            return
+        }
+
+        removeInputReleaseObservers()
+        observedWindow = window
+
+        let center = NotificationCenter.default
+        let queue = OperationQueue.main
+        let names: [Notification.Name] = [
+            NSWindow.didResignKeyNotification,
+            NSWindow.didResignMainNotification,
+            NSWindow.willCloseNotification,
+            NSApplication.didResignActiveNotification,
+        ]
+
+        for name in names {
+            let object: Any? = name == NSApplication.didResignActiveNotification ? NSApp : window
+            let token = center.addObserver(
+                forName: name,
+                object: object,
+                queue: queue
+            ) { [weak self] _ in
+                self?.releaseAllKeys()
+            }
+            inputReleaseObservers.append(token)
+        }
+    }
+
+    private func removeInputReleaseObservers() {
+        let center = NotificationCenter.default
+        for token in inputReleaseObservers {
+            center.removeObserver(token)
+        }
+        inputReleaseObservers.removeAll()
+        observedWindow = nil
+    }
+
+    private func installKeyUpMonitor() {
+        guard keyUpMonitor == nil else {
+            return
+        }
+
+        keyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
+            self?.releaseKeyIfFocusMovedAway(event)
+            return event
+        }
+    }
+
+    private func removeKeyUpMonitor() {
+        if let keyUpMonitor {
+            NSEvent.removeMonitor(keyUpMonitor)
+            self.keyUpMonitor = nil
+        }
+    }
+
+    private func releaseKeyIfFocusMovedAway(_ event: NSEvent) {
+        guard let window,
+              event.window === window,
+              window.firstResponder !== self,
+              let code = pressedMacKeyCodes[event.keyCode] else {
+            return
+        }
+        sendKey(code: code, macKeyCode: event.keyCode, pressed: false)
     }
 
     private func claimInputFocusSoon() {

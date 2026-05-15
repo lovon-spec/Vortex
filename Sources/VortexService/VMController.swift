@@ -196,11 +196,12 @@ public final class VMController: Identifiable {
         isStarting = false
     }
 
-    public func stop() async {
+    @discardableResult
+    public func stop() async -> Bool {
         if let vm {
-            guard vm.canRequestStop || vm.canStop else { return }
+            guard vm.canRequestStop || vm.canStop else { return false }
         } else {
-            guard canStop else { return }
+            guard canStop else { return false }
         }
         stateLabel = "Stopping"
         canStop = false
@@ -217,8 +218,11 @@ public final class VMController: Identifiable {
                 }.value
                 updateNativeState(nativeLinuxVM.vm.lifecycle.state)
             }
+            return true
         } catch {
             errorMessage = error.localizedDescription
+            updateFromVZState()
+            return false
         }
     }
 
