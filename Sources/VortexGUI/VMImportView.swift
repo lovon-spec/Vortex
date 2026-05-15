@@ -79,7 +79,7 @@ struct VMImportView: View {
 
     // MARK: - Constants
 
-    private static let lastImportDirectoryDefaultsKey = "VMImportView.lastImportDirectory"
+    private static let lastImportDirectoryDefaultsKey = "VMImportView.lastImportDirectory.v2"
 
     private var maxCPUCores: Int {
         HardwareProfile.maximumCPUCores
@@ -539,6 +539,7 @@ struct VMImportView: View {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
+        panel.showsHiddenFiles = true
 
         guard panel.runModal() == .OK, let selectedURL = panel.url else {
             return
@@ -572,22 +573,15 @@ struct VMImportView: View {
     }
 
     private static func defaultImportDirectoryURL() -> URL? {
-        let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser
-        let candidates: [URL?] = [
-            UserDefaults.standard.string(forKey: lastImportDirectoryDefaultsKey).map {
-                URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath)
-            },
-            home.appendingPathComponent("Library/Containers/com.utmapp.UTM/Data/Documents"),
-            fm.urls(for: .documentDirectory, in: .userDomainMask).first,
-            home,
-        ]
+        let home = FileManager.default.homeDirectoryForCurrentUser
 
-        return candidates.compactMap { $0 }.first { url in
-            var isDirectory: ObjCBool = false
-            return fm.fileExists(atPath: url.path, isDirectory: &isDirectory)
-                && isDirectory.boolValue
+        if let storedPath = UserDefaults.standard.string(forKey: lastImportDirectoryDefaultsKey),
+           !storedPath.isEmpty {
+            return URL(fileURLWithPath: (storedPath as NSString).expandingTildeInPath)
         }
+
+        let utmDocuments = home.appendingPathComponent("Library/Containers/com.utmapp.UTM/Data/Documents")
+        return utmDocuments
     }
 
     private static func storeImportDirectory(for selectedURL: URL) {
