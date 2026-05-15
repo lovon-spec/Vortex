@@ -574,13 +574,16 @@ struct VMImportView: View {
 
     private static func defaultImportDirectoryURL() -> URL? {
         let home = FileManager.default.homeDirectoryForCurrentUser
+        let utmDocuments = home.appendingPathComponent("Library/Containers/com.utmapp.UTM/Data/Documents")
 
         if let storedPath = UserDefaults.standard.string(forKey: lastImportDirectoryDefaultsKey),
            !storedPath.isEmpty {
-            return URL(fileURLWithPath: (storedPath as NSString).expandingTildeInPath)
+            let storedURL = URL(fileURLWithPath: (storedPath as NSString).expandingTildeInPath)
+            if storedURL.path.hasPrefix(utmDocuments.path) {
+                return storedURL
+            }
         }
 
-        let utmDocuments = home.appendingPathComponent("Library/Containers/com.utmapp.UTM/Data/Documents")
         return utmDocuments
     }
 
