@@ -531,10 +531,20 @@ struct VMImportView: View {
     // MARK: - Disk Image Panel
 
     private func openDiskImagePanel() {
+        let preferredDirectory = Self.defaultImportDirectoryURL()
+        if Self.isUTMDocumentsURL(preferredDirectory) {
+            do {
+                try Self.requestDirectoryAccess(preferredDirectory)
+                importError = nil
+            } catch {
+                importError = "macOS has not granted Vortex access to UTM's app data. If no prompt appears, add Vortex to Full Disk Access and try again. \(error.localizedDescription)"
+            }
+        }
+
         let panel = NSOpenPanel()
         panel.title = "Select Disk Image"
         panel.message = "Choose a disk image file or UTM bundle to import."
-        panel.directoryURL = Self.defaultImportDirectoryURL()
+        panel.directoryURL = preferredDirectory
         panel.allowedContentTypes = [.data, .package]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
@@ -573,8 +583,7 @@ struct VMImportView: View {
     }
 
     private static func defaultImportDirectoryURL() -> URL? {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let utmDocuments = home.appendingPathComponent("Library/Containers/com.utmapp.UTM/Data/Documents")
+        let utmDocuments = utmDocumentsURL()
 
         if let storedPath = UserDefaults.standard.string(forKey: lastImportDirectoryDefaultsKey),
            !storedPath.isEmpty {
@@ -585,6 +594,25 @@ struct VMImportView: View {
         }
 
         return utmDocuments
+    }
+
+    private static func utmDocumentsURL() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Containers/com.utmapp.UTM/Data/Documents")
+    }
+
+    private static func isUTMDocumentsURL(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        return url.path.hasPrefix(utmDocumentsURL().path)
+    }
+
+    private static func requestDirectoryAccess(_ url: URL?) throws {
+        guard let url else { return }
+        _ = try FileManager.default.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: nil,
+            options: []
+        )
     }
 
     private static func storeImportDirectory(for selectedURL: URL) {
