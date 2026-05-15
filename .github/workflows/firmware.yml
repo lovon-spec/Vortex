@@ -45,3 +45,11 @@ jobs:
 
       - name: Rebuild pinned ArmVirtQemu-AARCH64 firmware
         run: scripts/firmware/build-edk2-aarch64.sh --jobs 4
+
+      - name: Upload rebuilt firmware
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edk2-aarch64-code-fd
+          path: .build/firmware/edk2-aarch64/out/edk2-aarch64-code.fd
+          if-no-files-found: ignore
