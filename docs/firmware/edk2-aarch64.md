@@ -58,3 +58,7 @@ scripts/firmware/build-edk2-aarch64.sh --install
 The source-build script requires Docker or Podman. It refuses to replace the
 bundled firmware unless the rebuilt pflash image has the recorded size and
 SHA-256.
+
+GitHub Actions runs the same checks in `.github/workflows/firmware.yml`, including
+the pinned container source rebuild, whenever firmware resources or scripts
+change.

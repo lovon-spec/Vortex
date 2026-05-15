@@ -88,10 +88,18 @@ find_container_engine() {
 }
 
 file_size() {
-    if stat -f '%z' "$1" >/dev/null 2>&1; then
-        stat -f '%z' "$1"
-    else
+    if stat -c '%s' "$1" >/dev/null 2>&1; then
         stat -c '%s' "$1"
+    else
+        stat -f '%z' "$1"
+    fi
+}
+
+sha256_hex() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        sha256sum "$1" | awk '{print $1}'
     fi
 }
 
@@ -159,7 +167,7 @@ python3 edk2-build.py \
 cp ../pc-bios/edk2-aarch64-code.fd /work/out/edk2-aarch64-code.fd"
 
 actual_size="$(file_size "${OUT_FD}")"
-actual_hash="$(shasum -a 256 "${OUT_FD}" | awk '{print $1}')"
+actual_hash="$(sha256_hex "${OUT_FD}")"
 if [ "${actual_size}" != "${EXPECTED_SIZE}" ]; then
     echo "error: built firmware size ${actual_size}, expected ${EXPECTED_SIZE}" >&2
     exit 1
@@ -171,7 +179,7 @@ fi
 
 if [ "${INSTALL}" -eq 1 ]; then
     cp "${OUT_FD}" "${BUNDLED_DIR}/edk2-aarch64-code.fd"
-    (cd "${BUNDLED_DIR}" && shasum -a 256 -c SHA256SUMS)
+    "${SCRIPT_DIR}/verify-bundled-firmware.sh" "${BUNDLED_DIR}"
 fi
 
 echo "built and verified ${OUT_FD}: ${EXPECTED_SHA256}"

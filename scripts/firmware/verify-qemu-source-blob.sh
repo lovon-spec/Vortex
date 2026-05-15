@@ -19,6 +19,22 @@ OUT_BZ2="${WORK_DIR}/edk2-aarch64-code.fd.bz2"
 OUT_FD="${WORK_DIR}/edk2-aarch64-code.fd"
 BUNDLED_FD="${ROOT_DIR}/Sources/VortexGUI/Resources/Firmware/edk2-aarch64-code.fd"
 
+file_size() {
+    if stat -c '%s' "$1" >/dev/null 2>&1; then
+        stat -c '%s' "$1"
+    else
+        stat -f '%z' "$1"
+    fi
+}
+
+sha256_hex() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        sha256sum "$1" | awk '{print $1}'
+    fi
+}
+
 rm -rf "${WORK_DIR}"
 mkdir -p "${WORK_DIR}"
 
@@ -30,15 +46,15 @@ if [ "${actual_commit}" != "${QEMU_COMMIT}" ]; then
 fi
 
 git -C "${QEMU_DIR}" show "HEAD:pc-bios/edk2-aarch64-code.fd.bz2" > "${OUT_BZ2}"
-actual_blob_hash="$(shasum -a 256 "${OUT_BZ2}" | awk '{print $1}')"
+actual_blob_hash="$(sha256_hex "${OUT_BZ2}")"
 if [ "${actual_blob_hash}" != "${QEMU_BLOB_SHA256}" ]; then
     echo "error: QEMU firmware blob hash ${actual_blob_hash}, expected ${QEMU_BLOB_SHA256}" >&2
     exit 1
 fi
 
 bunzip2 -c "${OUT_BZ2}" > "${OUT_FD}"
-actual_size="$(stat -f '%z' "${OUT_FD}")"
-actual_hash="$(shasum -a 256 "${OUT_FD}" | awk '{print $1}')"
+actual_size="$(file_size "${OUT_FD}")"
+actual_hash="$(sha256_hex "${OUT_FD}")"
 if [ "${actual_size}" != "${EXPECTED_SIZE}" ]; then
     echo "error: decompressed firmware size ${actual_size}, expected ${EXPECTED_SIZE}" >&2
     exit 1
@@ -49,7 +65,7 @@ if [ "${actual_hash}" != "${EXPECTED_SHA256}" ]; then
 fi
 
 if [ -f "${BUNDLED_FD}" ]; then
-    bundled_hash="$(shasum -a 256 "${BUNDLED_FD}" | awk '{print $1}')"
+    bundled_hash="$(sha256_hex "${BUNDLED_FD}")"
     if [ "${bundled_hash}" != "${EXPECTED_SHA256}" ]; then
         echo "error: bundled firmware hash ${bundled_hash}, expected ${EXPECTED_SHA256}" >&2
         exit 1

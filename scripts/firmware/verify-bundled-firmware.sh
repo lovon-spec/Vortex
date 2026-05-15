@@ -17,4 +17,8 @@ if [ ! -f "${FIRMWARE_DIR}/SHA256SUMS" ]; then
     exit 1
 fi
 
-(cd "${FIRMWARE_DIR}" && shasum -a 256 -c SHA256SUMS)
+if command -v shasum >/dev/null 2>&1; then
+    (cd "${FIRMWARE_DIR}" && shasum -a 256 -c SHA256SUMS)
+else
+    (cd "${FIRMWARE_DIR}" && sha256sum -c SHA256SUMS)
+fi

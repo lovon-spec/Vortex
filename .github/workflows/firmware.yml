@@ -1,0 +1,47 @@
+name: Firmware
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/firmware.yml"
+      - "Sources/VortexGUI/Resources/Firmware/**"
+      - "scripts/firmware/**"
+      - "docs/firmware/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/firmware.yml"
+      - "Sources/VortexGUI/Resources/Firmware/**"
+      - "scripts/firmware/**"
+      - "docs/firmware/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify AArch64 EDK2 firmware
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Tool versions
+        run: |
+          set -euo pipefail
+          git --version
+          docker --version
+
+      - name: Verify bundled firmware checksum
+        run: scripts/firmware/verify-bundled-firmware.sh
+
+      - name: Verify pinned QEMU release blob
+        run: scripts/firmware/verify-qemu-source-blob.sh
+
+      - name: Rebuild pinned ArmVirtQemu-AARCH64 firmware
+        run: scripts/firmware/build-edk2-aarch64.sh --jobs 4
