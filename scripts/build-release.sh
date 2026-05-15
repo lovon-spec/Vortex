@@ -33,6 +33,7 @@ GUEST_DIR="${ROOT_DIR}/GuestTools"
 APP_BUNDLE="${BUILD_DIR}/Vortex.app"
 APP_CONTENTS="${APP_BUNDLE}/Contents"
 APP_MACOS="${APP_CONTENTS}/MacOS"
+APP_RESOURCES="${APP_CONTENTS}/Resources"
 
 DMG_NAME="Vortex.dmg"
 DMG_STAGING="${BUILD_DIR}/dmg-staging"
@@ -97,10 +98,14 @@ done
 log "Step 3/6: Creating Vortex.app bundle"
 
 rm -rf "${APP_BUNDLE}"
-mkdir -p "${APP_MACOS}"
+mkdir -p "${APP_MACOS}" "${APP_RESOURCES}"
 
 gui_bin=$(find_binary release "VortexGUI") || die "VortexGUI release binary not found"
 cp "${gui_bin}" "${APP_MACOS}/VortexGUI"
+
+if [ -f "Sources/VortexGUI/Resources/AppIcon.icns" ]; then
+    cp "Sources/VortexGUI/Resources/AppIcon.icns" "${APP_RESOURCES}/AppIcon.icns"
+fi
 
 cat > "${APP_CONTENTS}/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -119,6 +124,8 @@ cat > "${APP_CONTENTS}/Info.plist" <<'PLIST'
     <string>1.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Vortex needs microphone access to capture audio for VM input routing.</string>
     <key>LSUIElement</key>

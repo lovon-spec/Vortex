@@ -28,6 +28,7 @@ GUEST_DIR      := $(ROOT_DIR)/GuestTools
 APP_BUNDLE     := $(BUILD_DIR)/Vortex.app
 APP_CONTENTS   := $(APP_BUNDLE)/Contents
 APP_MACOS      := $(APP_CONTENTS)/MacOS
+APP_RESOURCES  := $(APP_CONTENTS)/Resources
 
 # -- DMG --
 DMG_NAME       := Vortex.dmg
@@ -83,7 +84,7 @@ guest-tools:
 app: release
 	@echo "==> Creating Vortex.app bundle..."
 	@rm -rf "$(APP_BUNDLE)"
-	@mkdir -p "$(APP_MACOS)"
+	@mkdir -p "$(APP_MACOS)" "$(APP_RESOURCES)"
 	@gui="$(BUILD_DIR)/release/VortexGUI"; \
 	if [ ! -x "$$gui" ]; then \
 		gui="$(BUILD_DIR)/arm64-apple-macosx/release/VortexGUI"; \
@@ -92,6 +93,9 @@ app: release
 		echo "error: VortexGUI release binary not found"; exit 1; \
 	fi; \
 	cp "$$gui" "$(APP_MACOS)/VortexGUI"
+	@if [ -f "Sources/VortexGUI/Resources/AppIcon.icns" ]; then \
+		cp "Sources/VortexGUI/Resources/AppIcon.icns" "$(APP_RESOURCES)/AppIcon.icns"; \
+	fi
 	@printf '%s\n' \
 		'<?xml version="1.0" encoding="UTF-8"?>' \
 		'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
@@ -109,6 +113,8 @@ app: release
 		'    <string>1.0</string>' \
 		'    <key>CFBundlePackageType</key>' \
 		'    <string>APPL</string>' \
+		'    <key>CFBundleIconFile</key>' \
+		'    <string>AppIcon</string>' \
 		'    <key>NSMicrophoneUsageDescription</key>' \
 		'    <string>Vortex needs microphone access to capture audio for VM input routing.</string>' \
 		'    <key>LSUIElement</key>' \
