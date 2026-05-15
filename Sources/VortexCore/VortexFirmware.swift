@@ -10,7 +10,7 @@ public enum VortexFirmware {
     public static let aarch64UEFIReference = "vortex-bundled://Firmware/edk2-aarch64-code.fd"
     public static let aarch64UEFIExpectedSizeBytes: UInt64 = 67_108_864
     public static let aarch64UEFIExpectedSHA256 =
-        "47765fe344818cbc464b1c14ae658fb4b854f5c2ceffa982411731eb4865594d"
+        "9a261ef74af201f7cc1735b037d7692d90bf3a62e96e462613e7f4565f4df101"
 
     public static func bundledAArch64UEFIURL(bundle: Bundle = .main) -> URL? {
         candidateBundledFirmwareURLs(bundle: bundle).first { FileManager.default.fileExists(atPath: $0.path) }

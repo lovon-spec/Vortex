@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify the bundled AArch64 firmware against QEMU's pinned release blob.
+# Verify QEMU's pinned AArch64 firmware release blob.
 
 set -euo pipefail
 
@@ -64,7 +64,7 @@ if [ "${actual_hash}" != "${EXPECTED_SHA256}" ]; then
     exit 1
 fi
 
-if [ -f "${BUNDLED_FD}" ]; then
+if [ "${VORTEX_VERIFY_QEMU_BLOB_MATCHES_BUNDLE:-0}" = "1" ] && [ -f "${BUNDLED_FD}" ]; then
     bundled_hash="$(sha256_hex "${BUNDLED_FD}")"
     if [ "${bundled_hash}" != "${EXPECTED_SHA256}" ]; then
         echo "error: bundled firmware hash ${bundled_hash}, expected ${EXPECTED_SHA256}" >&2
@@ -72,4 +72,4 @@ if [ -f "${BUNDLED_FD}" ]; then
     fi
 fi
 
-echo "verified QEMU ${QEMU_TAG} firmware blob and bundled AArch64 firmware: ${EXPECTED_SHA256}"
+echo "verified QEMU ${QEMU_TAG} firmware blob: ${EXPECTED_SHA256}"

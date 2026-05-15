@@ -10,7 +10,7 @@ longer auto-discovers Homebrew or UTM firmware as a default.
 - Bundled firmware reference: `vortex-bundled://Firmware/edk2-aarch64-code.fd`
 - Bundle location: `Vortex.app/Contents/Resources/Firmware/edk2-aarch64-code.fd`
 - Expected size: `67108864`
-- Expected SHA-256: `47765fe344818cbc464b1c14ae658fb4b854f5c2ceffa982411731eb4865594d`
+- Expected SHA-256: `9a261ef74af201f7cc1735b037d7692d90bf3a62e96e462613e7f4565f4df101`
 
 Vortex validates the size and SHA-256 before loading the bundled firmware. The
 app packaging scripts also verify `SHA256SUMS` after copying the firmware into
@@ -24,10 +24,16 @@ the app bundle.
 - QEMU build recipe tag: `v10.2.2`
 - QEMU build recipe commit: `f8ed81651e61d9c2166df6121ce2af0f44f06b3e`
 - Build container: `ghcr.io/tianocore/containers/ubuntu-22-build@sha256:bcda96cb0b9a39a881122ab7d3be86e6151f4c66968421827384c97850c790a5`
+- Deterministic timestamp epoch: `1723507200` (`2024-08-13T00:00:00Z`)
 
 Submodule gitlinks are recorded in
 `Sources/VortexGUI/Resources/Firmware/edk2-aarch64-code.fd.provenance.json` and
 asserted by `scripts/firmware/build-edk2-aarch64.sh`.
+
+The pinned EDK2 BaseTools `GenFw` source stamps generated PE/COFF images with
+the current time. `scripts/firmware/build-edk2-aarch64.sh` applies a narrowly
+scoped deterministic timestamp patch before building BaseTools, using the EDK2
+release date above. The patch is part of the recorded build recipe.
 
 ## Verification Commands
 
@@ -37,7 +43,7 @@ Verify the checked-in firmware resource:
 scripts/firmware/verify-bundled-firmware.sh
 ```
 
-Verify the checked-in firmware against the pinned QEMU release blob:
+Verify QEMU's pinned release blob for comparison:
 
 ```sh
 scripts/firmware/verify-qemu-source-blob.sh
