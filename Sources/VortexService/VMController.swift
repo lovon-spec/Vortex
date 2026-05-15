@@ -45,6 +45,8 @@ public final class VMController: Identifiable {
     public var isStarting: Bool = false
     public var serialConsoleText: String = ""
     public var nativeFramebuffer: NativeLinuxFramebuffer?
+    @ObservationIgnored
+    public var onStopped: ((UUID) -> Void)?
 
     /// Whether the guest audio daemon has connected to the bridge.
     ///
@@ -87,6 +89,10 @@ public final class VMController: Identifiable {
     private nonisolated(unsafe) var ownerLock: VMOwnerLock?
     @ObservationIgnored
     private var didReleaseVmnetNetworks = false
+    @ObservationIgnored
+    private var hasEnteredRuntime = false
+    @ObservationIgnored
+    private var didNotifyStopped = false
 
     public init(
         vm: VZVirtualMachine,
@@ -174,6 +180,8 @@ public final class VMController: Identifiable {
         isStarting = true
         stateLabel = "Starting"
         canStart = false
+        hasEnteredRuntime = true
+        didNotifyStopped = false
         errorMessage = nil
         do {
             if let vm, let manager {
@@ -205,6 +213,7 @@ public final class VMController: Identifiable {
         }
         stateLabel = "Stopping"
         canStop = false
+        hasEnteredRuntime = true
         stopBridgePolling()
         stopDeviceWatcher()
         detachAudioBridge()
@@ -461,6 +470,10 @@ public final class VMController: Identifiable {
         canPause = state.canPause
         canResume = state.canResume
         canStop = state.canStop
+        handleLifecycleState(
+            stopped: state == .stopped,
+            active: state == .starting || state == .running || state == .paused || state == .stopping
+        )
     }
 
     public func updateFromVZState() {
@@ -479,6 +492,10 @@ public final class VMController: Identifiable {
         canPause = vm.canPause
         canResume = vm.canResume
         canStop = vm.canRequestStop || vm.canStop
+        handleLifecycleState(
+            stopped: vzState == .stopped,
+            active: vzState == .starting || vzState == .running || vzState == .paused
+        )
     }
 
     private func updateNativeState(_ state: VortexHV.VMLifecycle.State) {
@@ -493,6 +510,31 @@ public final class VMController: Identifiable {
         if state == .error {
             errorMessage = nativeLinuxVM?.vm.lifecycle.errorMessage ?? errorMessage
         }
+        handleLifecycleState(
+            stopped: state == .stopped,
+            active: state == .starting || state == .running || state == .paused || state == .stopping
+        )
+    }
+
+    private func handleLifecycleState(stopped: Bool, active: Bool) {
+        if active {
+            hasEnteredRuntime = true
+            didNotifyStopped = false
+            return
+        }
+
+        guard stopped, hasEnteredRuntime, !didNotifyStopped else { return }
+        didNotifyStopped = true
+        hasEnteredRuntime = false
+        cleanupStoppedRuntime()
+        onStopped?(id)
+    }
+
+    private func cleanupStoppedRuntime() {
+        stopBridgePolling()
+        stopDeviceWatcher()
+        detachAudioBridge()
+        nativeLinuxVM?.close()
     }
 
     private func appendSerialByte(_ byte: UInt8) {

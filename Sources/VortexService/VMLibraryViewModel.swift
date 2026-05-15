@@ -101,7 +101,8 @@ public final class VMLibraryViewModel {
 
     /// Whether a given VM is currently running.
     public func isRunning(_ id: UUID) -> Bool {
-        runningControllers[id] != nil
+        guard let controller = runningControllers[id] else { return false }
+        return controller.isStarting || controller.isRunning || controller.isPaused || controller.canStop
     }
 
     /// Returns the controller for a running VM, if it exists.
@@ -138,12 +139,19 @@ public final class VMLibraryViewModel {
         id: UUID,
         startOptions: VortexVMStartOptions? = nil
     ) throws -> VMController {
-        // If already running, return existing controller.
         if let existing = runningControllers[id] {
             if startOptions?.hasOverrides == true {
                 VortexLog.service.warning("Ignoring start options for already running VM \(id)")
             }
-            return existing
+            if existing.canStart
+                && !existing.isStarting
+                && !existing.isRunning
+                && !existing.isPaused
+                && !existing.canStop {
+                cleanupController(for: id)
+            } else {
+                return existing
+            }
         }
 
         var config = try repo.load(id: id)
@@ -175,6 +183,16 @@ public final class VMLibraryViewModel {
             VmnetNetworkRegistry.shared.releaseNetworks(for: config.network.interfaces)
             ownerLock.release()
             throw error
+        }
+        controller.onStopped = { [weak self, weak controller] stoppedID in
+            Task { @MainActor in
+                guard let self,
+                      let controller,
+                      self.runningControllers[stoppedID] === controller else {
+                    return
+                }
+                self.cleanupController(for: stoppedID)
+            }
         }
         runningControllers[id] = controller
         return controller

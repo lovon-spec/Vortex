@@ -57,6 +57,8 @@ public final class NativeLinuxVM: @unchecked Sendable {
     private var keyboardInput: VirtioInputDevice?
     private var tabletInput: VirtioInputDevice?
     private var entropyDevice: VirtioEntropyDevice?
+    private let closeLock = NSLock()
+    private var didCloseBackends = false
 
     public init(configuration: VMConfiguration) throws {
         self.configuration = configuration
@@ -89,6 +91,10 @@ public final class NativeLinuxVM: @unchecked Sendable {
     public func stop() throws {
         defer { closeBlockBackends() }
         try vm.stop()
+    }
+
+    public func close() {
+        closeBlockBackends()
     }
 
     public func sendKey(code: UInt16, pressed: Bool) {
@@ -438,6 +444,26 @@ public final class NativeLinuxVM: @unchecked Sendable {
     }
 
     private func closeBlockBackends() {
+        closeLock.lock()
+        guard !didCloseBackends else {
+            closeLock.unlock()
+            return
+        }
+        didCloseBackends = true
+
+        let blockBackends = self.blockBackends
+        let networkBackends = self.networkBackends
+        let audioRouter = self.audioRouter
+        let flash = self.flash
+
+        self.flash = nil
+        keyboardInput = nil
+        tabletInput = nil
+        self.blockBackends.removeAll()
+        self.networkBackends.removeAll()
+        self.audioRouter = nil
+        closeLock.unlock()
+
         for backend in blockBackends {
             try? backend.flush()
             backend.close()
@@ -447,12 +473,6 @@ public final class NativeLinuxVM: @unchecked Sendable {
         }
         audioRouter?.stop()
         try? flash?.flush()
-        flash = nil
-        keyboardInput = nil
-        tabletInput = nil
-        blockBackends.removeAll()
-        networkBackends.removeAll()
-        audioRouter = nil
     }
 
     // MARK: - Boot

@@ -136,6 +136,7 @@ private struct VMBootErrorView: View {
 /// The main display content: VZVirtualMachineView + toolbar + status bar.
 private struct VMDisplayContent: View {
     @Bindable var controller: VMController
+    @Environment(VMLibraryViewModel.self) private var viewModel
 
     var body: some View {
         VStack(spacing: 0) {
@@ -170,7 +171,7 @@ private struct VMDisplayContent: View {
                 // Power controls
                 if controller.canStart {
                     Button {
-                        Task { await controller.start() }
+                        Task { await viewModel.bootVM(id: controller.id) }
                     } label: {
                         Label("Start", systemImage: "play.fill")
                     }
@@ -197,7 +198,7 @@ private struct VMDisplayContent: View {
 
                 if controller.canStop {
                     Button {
-                        Task { await controller.stop() }
+                        Task { await viewModel.stopVM(id: controller.id) }
                     } label: {
                         Label("Stop", systemImage: "stop.fill")
                     }
