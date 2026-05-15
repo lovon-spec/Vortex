@@ -20,6 +20,7 @@ set -euo pipefail
 
 # -- Configuration --
 SIGNING_ID="${SIGNING_ID:--}"
+DMG_SIZE="${DMG_SIZE:-256m}"
 
 # Resolve project root (one level up from scripts/).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -179,6 +180,7 @@ fi
 rm -f "${DMG_PATH}"
 hdiutil create \
     -volname Vortex \
+    -size "${DMG_SIZE}" \
     -srcfolder "${DMG_STAGING}" \
     -ov \
     -format UDZO \

@@ -35,6 +35,7 @@ APP_RESOURCES  := $(APP_CONTENTS)/Resources
 DMG_NAME       := Vortex.dmg
 DMG_STAGING    := $(BUILD_DIR)/dmg-staging
 DMG_PATH       := $(BUILD_DIR)/$(DMG_NAME)
+DMG_SIZE       ?= 256m
 
 # ============================================================
 # Phony targets
@@ -143,6 +144,7 @@ dmg: app guest-tools
 	@rm -f "$(DMG_PATH)"
 	hdiutil create \
 		-volname Vortex \
+		-size "$(DMG_SIZE)" \
 		-srcfolder "$(DMG_STAGING)" \
 		-ov \
 		-format UDZO \
