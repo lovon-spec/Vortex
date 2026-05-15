@@ -310,9 +310,9 @@ struct StartLinuxHVCommand: ParsableCommand {
         }
 
         candidates.append(contentsOf: [
-            "/Applications/UTM.app/Contents/Resources/qemu/edk2-aarch64-code.fd",
             "/opt/homebrew/share/qemu/edk2-aarch64-code.fd",
             "/usr/local/share/qemu/edk2-aarch64-code.fd",
+            "/Applications/UTM.app/Contents/Resources/qemu/edk2-aarch64-code.fd",
         ])
 
         for cellar in ["/opt/homebrew/Cellar/qemu", "/usr/local/Cellar/qemu"] {
@@ -329,7 +329,7 @@ struct StartLinuxHVCommand: ParsableCommand {
     private static func findRemoteAArch64UEFIFirmware(nearDisk disk: String) throws -> String? {
         let resource = try SSHResource(urlString: disk)
         let command = """
-        for p in /Applications/UTM.app/Contents/Resources/qemu/edk2-aarch64-code.fd /opt/homebrew/share/qemu/edk2-aarch64-code.fd /usr/local/share/qemu/edk2-aarch64-code.fd; do \
+        for p in /opt/homebrew/share/qemu/edk2-aarch64-code.fd /usr/local/share/qemu/edk2-aarch64-code.fd /Applications/UTM.app/Contents/Resources/qemu/edk2-aarch64-code.fd; do \
         [ -f "$p" ] && printf '%s' "$p" && exit 0; done; \
         found=$(find /opt/homebrew/Cellar/qemu /usr/local/Cellar/qemu -path '*/share/qemu/edk2-aarch64-code.fd' -type f -print -quit 2>/dev/null); \
         [ -n "$found" ] && printf '%s' "$found" && exit 0; exit 1

@@ -200,6 +200,7 @@ public final class VMLibraryViewModel {
                 && !controller.isRunning
                 && !controller.isPaused
                 && !controller.isStarting {
+                await controller.stop()
                 controller.releaseOwnerLock()
                 runningControllers.removeValue(forKey: id)
             }

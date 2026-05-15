@@ -902,9 +902,9 @@ struct VMImportView: View {
         }
 
         candidates.append(contentsOf: [
-            "/Applications/UTM.app/Contents/Resources/qemu/edk2-aarch64-code.fd",
             "/opt/homebrew/share/qemu/edk2-aarch64-code.fd",
             "/usr/local/share/qemu/edk2-aarch64-code.fd",
+            "/Applications/UTM.app/Contents/Resources/qemu/edk2-aarch64-code.fd",
         ])
 
         for cellar in ["/opt/homebrew/Cellar/qemu", "/usr/local/Cellar/qemu"] {

@@ -485,7 +485,7 @@ public final class VMController: Identifiable {
         canStart = (state == .stopped || state == .error)
         canPause = (state == .running)
         canResume = (state == .paused)
-        canStop = (state == .running || state == .paused)
+        canStop = (state == .running || state == .paused || state == .error)
         if state == .error {
             errorMessage = nativeLinuxVM?.vm.lifecycle.errorMessage ?? errorMessage
         }
