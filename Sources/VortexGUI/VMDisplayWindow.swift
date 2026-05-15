@@ -424,6 +424,9 @@ private final class NativeLinuxFramebufferNSView: NSView {
             return
         }
         sendKey(code: code, macKeyCode: event.keyCode, pressed: true)
+        if shouldReleaseAfterCommandChord(event) {
+            sendKey(code: code, macKeyCode: event.keyCode, pressed: false)
+        }
     }
 
     override func keyUp(with event: NSEvent) {
@@ -447,6 +450,9 @@ private final class NativeLinuxFramebufferNSView: NSView {
         let pressed = !(modifierStates[event.keyCode] ?? false)
         modifierStates[event.keyCode] = pressed
         sendKey(code: code, macKeyCode: event.keyCode, pressed: pressed)
+        if NativeLinuxKeyMap.isCommandMacKeyCode(event.keyCode), !pressed {
+            releasePressedNonModifierKeys()
+        }
     }
 
     private func sendPointerEvent(_ event: NSEvent) {
@@ -474,12 +480,31 @@ private final class NativeLinuxFramebufferNSView: NSView {
                 pressedMacKeyCodes[macKeyCode] = code
             }
         } else {
-            pressedLinuxKeys.remove(code)
+            guard pressedLinuxKeys.remove(code) != nil else {
+                if let macKeyCode {
+                    pressedMacKeyCodes.removeValue(forKey: macKeyCode)
+                }
+                return
+            }
             if let macKeyCode {
                 pressedMacKeyCodes.removeValue(forKey: macKeyCode)
             }
         }
         controller?.sendNativeKey(code: code, pressed: pressed)
+    }
+
+    private func shouldReleaseAfterCommandChord(_ event: NSEvent) -> Bool {
+        event.modifierFlags.contains(.command)
+            && !NativeLinuxKeyMap.isModifierMacKeyCode(event.keyCode)
+    }
+
+    private func releasePressedNonModifierKeys() {
+        let keys = pressedMacKeyCodes.filter { macKeyCode, _ in
+            !NativeLinuxKeyMap.isModifierMacKeyCode(macKeyCode)
+        }
+        for (macKeyCode, code) in keys {
+            sendKey(code: code, macKeyCode: macKeyCode, pressed: false)
+        }
     }
 
     private func releaseAllKeys() {
@@ -636,6 +661,8 @@ private final class NativeLinuxFramebufferNSView: NSView {
 
 private enum NativeLinuxKeyMap {
     static let capsLockMacKeyCode: UInt16 = 57
+    private static let commandMacKeyCodes: Set<UInt16> = [54, 55]
+    private static let modifierMacKeyCodes: Set<UInt16> = [54, 55, 56, 57, 58, 59, 60, 61, 62]
 
     private static let keyCodes: [UInt16: UInt16] = [
         0: 30, 1: 31, 2: 32, 3: 33, 4: 35, 5: 34, 6: 44, 7: 45,
@@ -658,6 +685,14 @@ private enum NativeLinuxKeyMap {
 
     static func linuxCode(forMacKeyCode keyCode: UInt16) -> UInt16? {
         keyCodes[keyCode]
+    }
+
+    static func isCommandMacKeyCode(_ keyCode: UInt16) -> Bool {
+        commandMacKeyCodes.contains(keyCode)
+    }
+
+    static func isModifierMacKeyCode(_ keyCode: UInt16) -> Bool {
+        modifierMacKeyCodes.contains(keyCode)
     }
 }
 
