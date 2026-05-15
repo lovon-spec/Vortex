@@ -65,6 +65,7 @@ struct VMImportView: View {
     @State private var qemuUTMConfig: UTMConfigPlist?
     @State private var qemuEFIStorePath: URL?
     @State private var qemuUEFIFirmwarePath: URL?
+    @State private var utmLibraryBundles: [URL] = []
 
     /// User-configurable VM parameters.
     @State private var vmName: String = "Imported VM"
@@ -280,15 +281,22 @@ struct VMImportView: View {
                             .font(.system(size: 28))
                             .foregroundStyle(.secondary)
 
-                        Text("Select a .img disk image to import")
+                        Text("Select a disk image or UTM bundle to import")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
 
-                        Button("Browse...") {
-                            openDiskImagePanel()
+                        HStack(spacing: 10) {
+                            Button("Browse...") {
+                                openDiskImagePanel()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.blue)
+
+                            Button("UTM Library") {
+                                loadUTMLibrary()
+                            }
+                            .buttonStyle(.bordered)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.blue)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 16)
@@ -297,6 +305,40 @@ struct VMImportView: View {
             .padding(12)
             .background(.black.opacity(0.2))
             .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            if !utmLibraryBundles.isEmpty {
+                utmLibrarySection
+            }
+        }
+    }
+
+    private var utmLibrarySection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(utmLibraryBundles, id: \.path) { bundle in
+                Button {
+                    selectImportSource(bundle)
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "shippingbox.fill")
+                            .foregroundStyle(.blue)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(bundle.deletingPathExtension().lastPathComponent)
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                            Text(bundle.path)
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Spacer()
+                    }
+                }
+                .buttonStyle(.plain)
+                .padding(8)
+                .background(.black.opacity(0.14))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
         }
     }
 
@@ -555,8 +597,10 @@ struct VMImportView: View {
             return
         }
 
-        Self.storeImportDirectory(for: selectedURL)
+        selectImportSource(selectedURL)
+    }
 
+    private func selectImportSource(_ selectedURL: URL) {
         let url: URL
         do {
             url = try resolveDiskImageSelection(selectedURL)
@@ -565,7 +609,9 @@ struct VMImportView: View {
             return
         }
 
+        Self.storeImportDirectory(for: selectedURL)
         diskImageURL = url
+        utmLibraryBundles = []
         importError = nil
 
         // Derive a VM name from the file or parent directory.
@@ -580,6 +626,36 @@ struct VMImportView: View {
 
         // Auto-detect companion files.
         detectCompanionFiles(near: url)
+    }
+
+    private func loadUTMLibrary() {
+        let libraryURL = Self.utmDocumentsURL()
+        do {
+            try Self.requestDirectoryAccess(libraryURL)
+            let bundles = try FileManager.default.contentsOfDirectory(
+                at: libraryURL,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: []
+            )
+            .filter { $0.pathExtension.lowercased() == "utm" }
+            .sorted {
+                $0.deletingPathExtension().lastPathComponent.localizedStandardCompare(
+                    $1.deletingPathExtension().lastPathComponent
+                ) == .orderedAscending
+            }
+
+            guard !bundles.isEmpty else {
+                utmLibraryBundles = []
+                importError = "No UTM bundles were found in \(libraryURL.path)."
+                return
+            }
+
+            utmLibraryBundles = bundles
+            importError = nil
+        } catch {
+            utmLibraryBundles = []
+            importError = "macOS has not granted Vortex access to UTM's app data. If no prompt appears, add Vortex to Full Disk Access and try again. \(error.localizedDescription)"
+        }
     }
 
     private static func defaultImportDirectoryURL() -> URL? {
