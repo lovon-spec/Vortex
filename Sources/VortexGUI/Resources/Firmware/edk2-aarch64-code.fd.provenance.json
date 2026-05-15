@@ -43,6 +43,15 @@
       "reason": "Pinned EDK2 GenFw writes PE/COFF TimeDateStamp from time(NULL), making otherwise identical firmware builds hash differently.",
       "change": "Set generated PE/COFF TimeDateStamp to 1723507200 before compiling BaseTools.",
       "appliedBy": "scripts/firmware/build-edk2-aarch64.sh"
+    },
+    {
+      "scope": "Compiler date/time builtins",
+      "files": [
+        "ArmPlatformPkg/Sec/Sec.c"
+      ],
+      "reason": "The ArmVirtQemu DEBUG build embeds compiler __DATE__ and __TIME__ strings in the SEC firmware banner.",
+      "change": "Export SOURCE_DATE_EPOCH=1723507200 and TZ=UTC into the pinned build container so compiler builtins expand deterministically.",
+      "appliedBy": "scripts/firmware/build-edk2-aarch64.sh"
     }
   ],
   "submodules": [
@@ -108,7 +117,7 @@
   "output": {
     "file": "edk2-aarch64-code.fd",
     "sizeBytes": 67108864,
-    "sha256": "9a261ef74af201f7cc1735b037d7692d90bf3a62e96e462613e7f4565f4df101"
+    "sha256": "6748b7f9ca864e47c565cc2d5fbc2a3133a3e08b56eeab52ff55fe0cd642a16e"
   },
   "verification": {
     "bundleRuntime": "Vortex validates size and SHA-256 before loading bundled firmware.",

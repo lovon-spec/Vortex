@@ -10,7 +10,7 @@ longer auto-discovers Homebrew or UTM firmware as a default.
 - Bundled firmware reference: `vortex-bundled://Firmware/edk2-aarch64-code.fd`
 - Bundle location: `Vortex.app/Contents/Resources/Firmware/edk2-aarch64-code.fd`
 - Expected size: `67108864`
-- Expected SHA-256: `9a261ef74af201f7cc1735b037d7692d90bf3a62e96e462613e7f4565f4df101`
+- Expected SHA-256: `6748b7f9ca864e47c565cc2d5fbc2a3133a3e08b56eeab52ff55fe0cd642a16e`
 
 Vortex validates the size and SHA-256 before loading the bundled firmware. The
 app packaging scripts also verify `SHA256SUMS` after copying the firmware into
@@ -33,7 +33,9 @@ asserted by `scripts/firmware/build-edk2-aarch64.sh`.
 The pinned EDK2 BaseTools `GenFw` source stamps generated PE/COFF images with
 the current time. `scripts/firmware/build-edk2-aarch64.sh` applies a narrowly
 scoped deterministic timestamp patch before building BaseTools, using the EDK2
-release date above. The patch is part of the recorded build recipe.
+release date above. The script also exports `SOURCE_DATE_EPOCH` into the pinned
+container so compiler `__DATE__` and `__TIME__` expansions use the same epoch.
+Both deterministic controls are part of the recorded build recipe.
 
 ## Verification Commands
 
