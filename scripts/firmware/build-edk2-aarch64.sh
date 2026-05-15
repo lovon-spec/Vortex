@@ -14,6 +14,7 @@ EDK2_REPO="https://github.com/tianocore/edk2.git"
 EDK2_COMMIT="4dfdca63a93497203f197ec98ba20e2327e4afe4"
 EDK2_VERSION_OVERRIDE="edk2-stable202408-prebuilt.qemu.org"
 EDK2_RELEASE_DATE="08/13/2024"
+EDK2_SOURCE_DATE_EPOCH="${VORTEX_FIRMWARE_SOURCE_DATE_EPOCH:-1723507200}"
 
 CONTAINER_IMAGE="ghcr.io/tianocore/containers/ubuntu-22-build@sha256:bcda96cb0b9a39a881122ab7d3be86e6151f4c66968421827384c97850c790a5"
 EXPECTED_SHA256="${VORTEX_FIRMWARE_EXPECTED_SHA256:-47765fe344818cbc464b1c14ae658fb4b854f5c2ceffa982411731eb4865594d}"
@@ -115,6 +116,20 @@ assert_gitlink() {
     fi
 }
 
+apply_reproducibility_patches() {
+    local timestamp="$1"
+    local elf32="${EDK2_DIR}/BaseTools/Source/C/GenFw/Elf32Convert.c"
+    local elf64="${EDK2_DIR}/BaseTools/Source/C/GenFw/Elf64Convert.c"
+
+    perl -0pi -e "s/NtHdr->Pe32\\.FileHeader\\.TimeDateStamp = \\(UINT32\\) time\\(NULL\\);/NtHdr->Pe32.FileHeader.TimeDateStamp = (UINT32) ${timestamp};/" "${elf32}"
+    perl -0pi -e "s/NtHdr->Pe32Plus\\.FileHeader\\.TimeDateStamp = \\(UINT32\\) time\\(NULL\\);/NtHdr->Pe32Plus.FileHeader.TimeDateStamp = (UINT32) ${timestamp};/" "${elf64}"
+
+    if grep -q "FileHeader\\.TimeDateStamp = (UINT32) time(NULL)" "${elf32}" "${elf64}"; then
+        echo "error: failed to patch GenFw PE/COFF timestamps for reproducible output" >&2
+        exit 1
+    fi
+}
+
 ENGINE="$(find_container_engine)"
 
 rm -rf "${WORK_DIR}"
@@ -133,6 +148,7 @@ git init "${EDK2_DIR}" >/dev/null
 git -C "${EDK2_DIR}" remote add origin "${EDK2_REPO}"
 git -C "${EDK2_DIR}" fetch --depth 1 origin "${EDK2_COMMIT}"
 git -C "${EDK2_DIR}" checkout --detach FETCH_HEAD
+apply_reproducibility_patches "${EDK2_SOURCE_DATE_EPOCH}"
 
 assert_gitlink "${EDK2_DIR}" "ArmPkg/Library/ArmSoftFloatLib/berkeley-softfloat-3" "b64af41c3276f97f0e181920400ee056b9c88037"
 assert_gitlink "${EDK2_DIR}" "BaseTools/Source/C/BrotliCompress/brotli" "f4153a09f87cbb9c826d8fc12c74642bb2d879ea"
