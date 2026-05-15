@@ -29,6 +29,7 @@ cd "${ROOT_DIR}"
 BUILD_DIR="${ROOT_DIR}/.build"
 ENTITLEMENTS="${ROOT_DIR}/Vortex.entitlements"
 GUEST_DIR="${ROOT_DIR}/GuestTools"
+FIRMWARE_COPY="${ROOT_DIR}/scripts/firmware/copy-bundled-firmware.sh"
 
 APP_BUNDLE="${BUILD_DIR}/Vortex.app"
 APP_CONTENTS="${APP_BUNDLE}/Contents"
@@ -106,6 +107,8 @@ cp "${gui_bin}" "${APP_MACOS}/VortexGUI"
 if [ -f "Sources/VortexGUI/Resources/AppIcon.icns" ]; then
     cp "Sources/VortexGUI/Resources/AppIcon.icns" "${APP_RESOURCES}/AppIcon.icns"
 fi
+
+"${FIRMWARE_COPY}" "${APP_RESOURCES}/Firmware"
 
 cat > "${APP_CONTENTS}/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

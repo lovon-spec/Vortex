@@ -523,7 +523,8 @@ public final class NativeLinuxVM: @unchecked Sendable {
             throw VortexError.fileNotFound(path: "<uefi-vars>")
         }
 
-        let firmwareData = try Self.pflashBankData(from: firmwarePath)
+        let resolvedFirmwarePath = try VortexFirmware.resolvedAArch64UEFIPath(firmwarePath)
+        let firmwareData = try Self.pflashBankData(from: resolvedFirmwarePath)
         try vm.mapROM(at: MachineMemoryMap.flashBase, data: firmwareData)
 
         let flash: FlashDevice

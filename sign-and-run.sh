@@ -34,6 +34,7 @@ if [ "$TARGET" = "VortexGUI" ]; then
     if [ -f "Sources/VortexGUI/Resources/AppIcon.icns" ]; then
         cp "Sources/VortexGUI/Resources/AppIcon.icns" "$RES_DIR/AppIcon.icns"
     fi
+    scripts/firmware/copy-bundled-firmware.sh "$RES_DIR/Firmware"
 
     cat > ".build/Vortex.app/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

@@ -23,6 +23,7 @@ ROOT_DIR       := $(shell pwd)
 BUILD_DIR      := $(ROOT_DIR)/.build
 ENTITLEMENTS   := $(ROOT_DIR)/Vortex.entitlements
 GUEST_DIR      := $(ROOT_DIR)/GuestTools
+FIRMWARE_COPY  := $(ROOT_DIR)/scripts/firmware/copy-bundled-firmware.sh
 
 # -- App bundle paths --
 APP_BUNDLE     := $(BUILD_DIR)/Vortex.app
@@ -96,6 +97,7 @@ app: release
 	@if [ -f "Sources/VortexGUI/Resources/AppIcon.icns" ]; then \
 		cp "Sources/VortexGUI/Resources/AppIcon.icns" "$(APP_RESOURCES)/AppIcon.icns"; \
 	fi
+	@"$(FIRMWARE_COPY)" "$(APP_RESOURCES)/Firmware"
 	@printf '%s\n' \
 		'<?xml version="1.0" encoding="UTF-8"?>' \
 		'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \

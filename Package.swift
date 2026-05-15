@@ -262,6 +262,7 @@ let package = Package(
                 "VortexVZ",
             ],
             path: "Sources/VortexGUI",
+            exclude: ["Resources"],
             linkerSettings: [
                 .linkedFramework("Virtualization"),
                 .linkedFramework("AppKit"),

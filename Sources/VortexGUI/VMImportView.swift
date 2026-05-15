@@ -397,6 +397,15 @@ struct VMImportView: View {
                     value: qemuUEFIFirmwarePath?.lastPathComponent,
                     icon: "cpu"
                 )
+                HStack {
+                    Spacer()
+                    Button {
+                        openAArch64FirmwarePanel()
+                    } label: {
+                        Label("Choose Firmware", systemImage: "folder")
+                    }
+                    .controlSize(.small)
+                }
             }
             .padding(12)
             .background(.black.opacity(0.2))
@@ -598,6 +607,23 @@ struct VMImportView: View {
         }
 
         selectImportSource(selectedURL)
+    }
+
+    private func openAArch64FirmwarePanel() {
+        let panel = NSOpenPanel()
+        panel.title = "Select AArch64 EDK2 Firmware"
+        panel.directoryURL = qemuUEFIFirmwarePath?.deletingLastPathComponent()
+        panel.allowedContentTypes = [.data]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.showsHiddenFiles = true
+
+        guard panel.runModal() == .OK, let selectedURL = panel.url else {
+            return
+        }
+
+        qemuUEFIFirmwarePath = selectedURL
     }
 
     private func selectImportSource(_ selectedURL: URL) {
@@ -896,24 +922,13 @@ struct VMImportView: View {
         let fm = FileManager.default
         var candidates: [String] = []
 
+        if let bundled = try? VortexFirmware.validatedBundledAArch64UEFIPath() {
+            candidates.append(bundled)
+        }
+
         if let envPath = ProcessInfo.processInfo.environment["VORTEX_AARCH64_UEFI"],
            !envPath.isEmpty {
             candidates.append(envPath)
-        }
-
-        candidates.append(contentsOf: [
-            "/opt/homebrew/share/qemu/edk2-aarch64-code.fd",
-            "/usr/local/share/qemu/edk2-aarch64-code.fd",
-            "/Applications/UTM.app/Contents/Resources/qemu/edk2-aarch64-code.fd",
-        ])
-
-        for cellar in ["/opt/homebrew/Cellar/qemu", "/usr/local/Cellar/qemu"] {
-            if let versions = try? fm.contentsOfDirectory(atPath: cellar) {
-                candidates.append(contentsOf: versions.map {
-                    ((cellar as NSString).appendingPathComponent($0) as NSString)
-                        .appendingPathComponent("share/qemu/edk2-aarch64-code.fd")
-                })
-            }
         }
 
         guard let match = candidates.first(where: { fm.fileExists(atPath: $0) }) else {
@@ -1011,6 +1026,9 @@ struct VMImportView: View {
             let resolvedEFIStorePath = shouldReferenceOriginalFiles
                 ? qemuEFIStorePath.path
                 : efiStorePath.path
+            let resolvedFirmwarePath = VortexFirmware.isBundledAArch64UEFIPath(qemuUEFIFirmwarePath.path)
+                ? VortexFirmware.aarch64UEFIReference
+                : qemuUEFIFirmwarePath.path
 
             config = VMConfiguration(
                 id: vmID,
@@ -1033,7 +1051,7 @@ struct VMImportView: View {
                 rosetta: .disabled,
                 bootConfig: .uefi(
                     storePath: resolvedEFIStorePath,
-                    firmwarePath: qemuUEFIFirmwarePath.path
+                    firmwarePath: resolvedFirmwarePath
                 )
             )
         } else if isMacOS {

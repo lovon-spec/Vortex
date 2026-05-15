@@ -305,6 +305,9 @@ public struct VMConfiguration: Codable, Identifiable, Sendable, Hashable {
         let bundlePrefix = bundleRoot.hasSuffix("/") ? bundleRoot : bundleRoot + "/"
 
         return referencedFilePaths.contains { path in
+            if VortexFirmware.isBundledFirmwarePath(path) {
+                return false
+            }
             let normalized = URL(fileURLWithPath: path)
                 .standardizedFileURL
                 .resolvingSymlinksInPath()

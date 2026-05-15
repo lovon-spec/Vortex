@@ -301,27 +301,15 @@ struct StartLinuxHVCommand: ParsableCommand {
     }
 
     private static func localAArch64UEFIFirmwareCandidates() -> [String] {
-        let fileManager = FileManager.default
         var candidates: [String] = []
+
+        if let bundled = try? VortexFirmware.validatedBundledAArch64UEFIPath() {
+            candidates.append(bundled)
+        }
 
         if let envPath = ProcessInfo.processInfo.environment["VORTEX_AARCH64_UEFI"],
            !envPath.isEmpty {
             candidates.append(envPath)
-        }
-
-        candidates.append(contentsOf: [
-            "/opt/homebrew/share/qemu/edk2-aarch64-code.fd",
-            "/usr/local/share/qemu/edk2-aarch64-code.fd",
-            "/Applications/UTM.app/Contents/Resources/qemu/edk2-aarch64-code.fd",
-        ])
-
-        for cellar in ["/opt/homebrew/Cellar/qemu", "/usr/local/Cellar/qemu"] {
-            if let versions = try? fileManager.contentsOfDirectory(atPath: cellar) {
-                candidates.append(contentsOf: versions.map {
-                    ((cellar as NSString).appendingPathComponent($0) as NSString)
-                        .appendingPathComponent("share/qemu/edk2-aarch64-code.fd")
-                })
-            }
         }
         return candidates
     }
@@ -329,10 +317,9 @@ struct StartLinuxHVCommand: ParsableCommand {
     private static func findRemoteAArch64UEFIFirmware(nearDisk disk: String) throws -> String? {
         let resource = try SSHResource(urlString: disk)
         let command = """
-        for p in /opt/homebrew/share/qemu/edk2-aarch64-code.fd /usr/local/share/qemu/edk2-aarch64-code.fd /Applications/UTM.app/Contents/Resources/qemu/edk2-aarch64-code.fd; do \
-        [ -f "$p" ] && printf '%s' "$p" && exit 0; done; \
-        found=$(find /opt/homebrew/Cellar/qemu /usr/local/Cellar/qemu -path '*/share/qemu/edk2-aarch64-code.fd' -type f -print -quit 2>/dev/null); \
-        [ -n "$found" ] && printf '%s' "$found" && exit 0; exit 1
+        q="${VORTEX_AARCH64_UEFI:-}"; \
+        [ -n "$q" ] && [ -f "$q" ] && printf '%s' "$q" && exit 0; \
+        exit 1
         """
 
         let process = Process()
