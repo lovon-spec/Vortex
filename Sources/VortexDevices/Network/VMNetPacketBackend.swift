@@ -7,6 +7,7 @@ import Foundation
 import vmnet
 import XPC
 import VortexCore
+import VortexNetworking
 
 public final class VMNetPacketBackend: NetworkPacketBackend, @unchecked Sendable {
     public let mode: NetworkMode
@@ -16,6 +17,7 @@ public final class VMNetPacketBackend: NetworkPacketBackend, @unchecked Sendable
     private let queue = DispatchQueue(label: "vortex.vmnet.packet-backend")
     private let lock = NSLock()
     private var interface: interface_ref?
+    private var networkLease: VmnetNetworkLease?
     private var onPacket: (@Sendable (Data) -> Void)?
     private var stopped = false
 
@@ -36,22 +38,40 @@ public final class VMNetPacketBackend: NetworkPacketBackend, @unchecked Sendable
         stopped = false
         lock.unlock()
 
-        let descriptor = try makeInterfaceDescriptor()
+        let preparedInterface = try makePreparedInterface()
+        let descriptor = preparedInterface.descriptor
         let semaphore = DispatchSemaphore(value: 0)
         var startStatus = vmnet_return_t.VMNET_FAILURE
         var startParameters: xpc_object_t?
 
-        guard let newInterface = vmnet_start_interface(descriptor, queue, { status, parameters in
-            startStatus = status
-            startParameters = parameters
-            semaphore.signal()
-        }) else {
+        let newInterface: interface_ref?
+        if let network = preparedInterface.network {
+            if #available(macOS 26.0, *) {
+                newInterface = vmnet_interface_start_with_network(network, descriptor, queue) { status, parameters in
+                    startStatus = status
+                    startParameters = parameters
+                    semaphore.signal()
+                }
+            } else {
+                newInterface = nil
+            }
+        } else {
+            newInterface = vmnet_start_interface(descriptor, queue) { status, parameters in
+                startStatus = status
+                startParameters = parameters
+                semaphore.signal()
+            }
+        }
+
+        guard let newInterface else {
+            releaseNetworkLease(preparedInterface.lease)
             throw NetworkPacketBackendError.startFailed("vmnet_start_interface returned nil.")
         }
 
         semaphore.wait()
         guard startStatus == vmnet_return_t.VMNET_SUCCESS else {
             stopInterface(newInterface)
+            releaseNetworkLease(preparedInterface.lease)
             throw NetworkPacketBackendError.startFailed(statusDescription(startStatus))
         }
 
@@ -62,6 +82,7 @@ public final class VMNetPacketBackend: NetworkPacketBackend, @unchecked Sendable
 
         lock.lock()
         interface = newInterface
+        networkLease = preparedInterface.lease
         lock.unlock()
 
         let callbackStatus = vmnet_interface_set_event_callback(
@@ -114,6 +135,8 @@ public final class VMNetPacketBackend: NetworkPacketBackend, @unchecked Sendable
         lock.lock()
         let currentInterface = interface
         interface = nil
+        let currentNetworkLease = networkLease
+        networkLease = nil
         onPacket = nil
         stopped = true
         lock.unlock()
@@ -121,24 +144,62 @@ public final class VMNetPacketBackend: NetworkPacketBackend, @unchecked Sendable
         if let currentInterface {
             stopInterface(currentInterface)
         }
+        releaseNetworkLease(currentNetworkLease)
     }
 
     deinit {
         stop()
     }
 
-    private func makeInterfaceDescriptor() throws -> xpc_object_t {
+    private func makePreparedInterface() throws -> PreparedInterface {
+        switch mode {
+        case .vmnetShared(let vmnet):
+            if #available(macOS 26.0, *) {
+                let network = try VmnetNetworkRegistry.shared.network(
+                    kind: .shared,
+                    networkID: vmnet.normalizedNetworkID,
+                    ipv4Subnet: vmnet.ipv4Subnet
+                )
+                return PreparedInterface(
+                    descriptor: makeInterfaceDescriptor(attachedToNetwork: true),
+                    network: network,
+                    lease: VmnetNetworkLease(
+                        kind: .shared,
+                        networkID: vmnet.normalizedNetworkID
+                    )
+                )
+            }
+            return PreparedInterface(
+                descriptor: makeInterfaceDescriptor(attachedToNetwork: false),
+                network: nil,
+                lease: nil
+            )
+
+        default:
+            return PreparedInterface(
+                descriptor: makeInterfaceDescriptor(attachedToNetwork: false),
+                network: nil,
+                lease: nil
+            )
+        }
+    }
+
+    private func makeInterfaceDescriptor(attachedToNetwork: Bool) -> xpc_object_t {
         let descriptor = xpc_dictionary_create(nil, nil, 0)
-        xpc_dictionary_set_uint64(descriptor, vmnet_operation_mode_key, UInt64(vmnetMode().rawValue))
         xpc_dictionary_set_string(descriptor, vmnet_mac_address_key, macAddress)
         xpc_dictionary_set_bool(descriptor, vmnet_allocate_mac_address_key, false)
-        xpc_dictionary_set_uint64(descriptor, vmnet_mtu_key, UInt64(mtu))
+        xpc_dictionary_set_bool(descriptor, vmnet_enable_isolation_key, false)
+
+        if !attachedToNetwork {
+            xpc_dictionary_set_uint64(descriptor, vmnet_operation_mode_key, UInt64(vmnetMode().rawValue))
+            xpc_dictionary_set_uint64(descriptor, vmnet_mtu_key, UInt64(mtu))
+        }
 
         switch mode {
         case .bridged(let hostInterface):
             xpc_dictionary_set_string(descriptor, vmnet_shared_interface_name_key, hostInterface)
         case .vmnetShared(let vmnet):
-            if let subnet = vmnet.ipv4Subnet {
+            if !attachedToNetwork, let subnet = vmnet.ipv4Subnet {
                 xpc_dictionary_set_string(descriptor, vmnet_start_address_key, subnet.hostAddress)
                 xpc_dictionary_set_string(descriptor, vmnet_end_address_key, subnet.hostAddress)
                 xpc_dictionary_set_string(descriptor, vmnet_subnet_mask_key, subnet.subnetMask)
@@ -148,6 +209,14 @@ public final class VMNetPacketBackend: NetworkPacketBackend, @unchecked Sendable
         }
 
         return descriptor
+    }
+
+    private func releaseNetworkLease(_ lease: VmnetNetworkLease?) {
+        guard let lease else { return }
+        VmnetNetworkRegistry.shared.releaseNetwork(
+            kind: lease.kind,
+            networkID: lease.networkID
+        )
     }
 
     private func vmnetMode() -> operating_modes_t {
@@ -229,4 +298,15 @@ public final class VMNetPacketBackend: NetworkPacketBackend, @unchecked Sendable
             return "vmnet status \(status.rawValue)"
         }
     }
+}
+
+private struct PreparedInterface {
+    let descriptor: xpc_object_t
+    let network: vmnet_network_ref?
+    let lease: VmnetNetworkLease?
+}
+
+private struct VmnetNetworkLease {
+    let kind: VmnetNetworkKind
+    let networkID: String
 }

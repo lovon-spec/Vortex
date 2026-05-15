@@ -8,6 +8,7 @@
 import Foundation
 import Virtualization
 import VortexCore
+import VortexNetworking
 import VortexPersistence
 
 // MARK: - VZVMManager

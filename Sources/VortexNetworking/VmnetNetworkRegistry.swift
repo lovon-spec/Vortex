@@ -1,107 +1,35 @@
-// VmnetNetworkRegistry.swift -- Shared vmnet-backed network attachments.
-// VortexVZ
+// VmnetNetworkRegistry.swift -- Shared vmnet-backed network reservations.
+// VortexNetworking
 
+import Darwin
 import Foundation
-import Virtualization
 import VortexCore
 import vmnet
-import Darwin
 
-@MainActor
-public final class VmnetNetworkRegistry {
+public final class VmnetNetworkRegistry: @unchecked Sendable {
     public static let shared = VmnetNetworkRegistry()
 
+    private let lock = NSLock()
     private var networks: [VmnetNetworkKey: VmnetNetworkEntry] = [:]
 
     private init() {}
 
-    func attachment(
+    @available(macOS 26.0, *)
+    public func network(
         kind: VmnetNetworkKind,
         networkID: String,
         ipv4Subnet: IPv4Subnet? = nil
-    ) throws -> VZNetworkDeviceAttachment {
-        guard #available(macOS 26.0, *) else {
-            throw VortexError.unsupported(
-                feature: "vmnet network attachment",
-                reason: "VZVmnetNetworkDeviceAttachment requires macOS 26.0 or newer."
-            )
-        }
-
-        let network = try network(
-            kind: kind,
-            networkID: normalizedNetworkID(networkID),
-            ipv4Subnet: ipv4Subnet
-        )
-        return VZVmnetNetworkDeviceAttachment(network: network)
-    }
-
-    public func releaseNetworks(for interfaces: [NetworkInterfaceConfig]) {
-        for iface in interfaces {
-            let key: VmnetNetworkKey?
-            switch iface.mode {
-            case .hostOnly:
-                key = VmnetNetworkKey(
-                    kind: .hostOnly,
-                    networkID: NetworkMode.defaultVmnetNetworkID
-                )
-            case .vmnetShared(let vmnet):
-                key = VmnetNetworkKey(
-                    kind: .shared,
-                    networkID: vmnet.normalizedNetworkID
-                )
-            case .nat, .bridged:
-                key = nil
-            }
-
-            guard let key, var entry = networks[key] else { continue }
-            if entry.referenceCount <= 1 {
-                release(entry.network)
-                networks.removeValue(forKey: key)
-            } else {
-                entry.referenceCount -= 1
-                networks[key] = entry
-            }
-        }
-    }
-
-    public func statuses(for interfaces: [NetworkInterfaceConfig]) -> [VmnetNetworkStatus] {
-        interfaces.compactMap { iface in
-            switch iface.mode {
-            case .hostOnly:
-                return status(
-                    kind: .hostOnly,
-                    networkID: NetworkMode.defaultVmnetNetworkID
-                )
-            case .vmnetShared(let vmnet):
-                return status(
-                    kind: .shared,
-                    networkID: vmnet.normalizedNetworkID
-                )
-            case .nat, .bridged:
-                return nil
-            }
-        }
-    }
-
-    func status(kind: VmnetNetworkKind, networkID: String) -> VmnetNetworkStatus? {
-        let key = VmnetNetworkKey(
-            kind: kind,
-            networkID: normalizedNetworkID(networkID)
-        )
-        return networks[key]?.status
-    }
-
-    @available(macOS 26.0, *)
-    private func network(
-        kind: VmnetNetworkKind,
-        networkID: String,
-        ipv4Subnet: IPv4Subnet?
     ) throws -> vmnet_network_ref {
-        let key = VmnetNetworkKey(kind: kind, networkID: networkID)
+        let normalizedID = normalizedNetworkID(networkID)
+        let key = VmnetNetworkKey(kind: kind, networkID: normalizedID)
+
+        lock.lock()
+        defer { lock.unlock() }
+
         if var existing = networks[key] {
             if existing.status.configuredIPv4Subnet != ipv4Subnet {
                 throw VortexError.networkConfigurationFailed(
-                    reason: "\(kind.displayName) network '\(networkID)' is already active with "
+                    reason: "\(kind.displayName) network '\(normalizedID)' is already active with "
                         + "\(existing.status.configuredIPv4Subnet?.cidrNotation ?? "automatic IPv4 subnet selection"); "
                         + "it cannot be reused with \(ipv4Subnet?.cidrNotation ?? "automatic IPv4 subnet selection") until the active VMs using it stop."
                 )
@@ -156,13 +84,83 @@ public final class VmnetNetworkRegistry {
             network: network,
             status: VmnetNetworkStatus(
                 kind: kind.displayName,
-                networkID: networkID,
+                networkID: normalizedID,
                 configuredIPv4Subnet: ipv4Subnet,
                 activeIPv4Subnet: activeIPv4Subnet
             ),
             referenceCount: 1
         )
         return network
+    }
+
+    public func releaseNetwork(kind: VmnetNetworkKind, networkID: String) {
+        let key = VmnetNetworkKey(
+            kind: kind,
+            networkID: normalizedNetworkID(networkID)
+        )
+
+        lock.lock()
+        guard var entry = networks[key] else {
+            lock.unlock()
+            return
+        }
+        if entry.referenceCount <= 1 {
+            networks.removeValue(forKey: key)
+            lock.unlock()
+            release(entry.network)
+        } else {
+            entry.referenceCount -= 1
+            networks[key] = entry
+            lock.unlock()
+        }
+    }
+
+    public func releaseNetworks(for interfaces: [NetworkInterfaceConfig]) {
+        for iface in interfaces {
+            switch iface.mode {
+            case .hostOnly:
+                releaseNetwork(
+                    kind: .hostOnly,
+                    networkID: NetworkMode.defaultVmnetNetworkID
+                )
+            case .vmnetShared(let vmnet):
+                releaseNetwork(
+                    kind: .shared,
+                    networkID: vmnet.normalizedNetworkID
+                )
+            case .nat, .bridged:
+                break
+            }
+        }
+    }
+
+    public func statuses(for interfaces: [NetworkInterfaceConfig]) -> [VmnetNetworkStatus] {
+        interfaces.compactMap { iface in
+            switch iface.mode {
+            case .hostOnly:
+                return status(
+                    kind: .hostOnly,
+                    networkID: NetworkMode.defaultVmnetNetworkID
+                )
+            case .vmnetShared(let vmnet):
+                return status(
+                    kind: .shared,
+                    networkID: vmnet.normalizedNetworkID
+                )
+            case .nat, .bridged:
+                return nil
+            }
+        }
+    }
+
+    public func status(kind: VmnetNetworkKind, networkID: String) -> VmnetNetworkStatus? {
+        let key = VmnetNetworkKey(
+            kind: kind,
+            networkID: normalizedNetworkID(networkID)
+        )
+        lock.lock()
+        defer { lock.unlock() }
+        return networks[key]?.status
     }
 
     @available(macOS 26.0, *)
@@ -228,7 +226,7 @@ public final class VmnetNetworkRegistry {
     }
 }
 
-enum VmnetNetworkKind: Hashable {
+public enum VmnetNetworkKind: Hashable, Sendable {
     case shared
     case hostOnly
 
@@ -242,7 +240,7 @@ enum VmnetNetworkKind: Hashable {
         }
     }
 
-    var displayName: String {
+    public var displayName: String {
         switch self {
         case .shared:
             return "shared vmnet"

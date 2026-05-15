@@ -17,6 +17,14 @@ let package = Package(
             name: "VortexCore",
             path: "Sources/VortexCore"
         ),
+        .target(
+            name: "VortexNetworking",
+            dependencies: ["VortexCore"],
+            path: "Sources/VortexNetworking",
+            linkerSettings: [
+                .linkedFramework("vmnet"),
+            ]
+        ),
         .testTarget(
             name: "VortexCoreTests",
             dependencies: ["VortexCore"],
@@ -102,7 +110,7 @@ let package = Package(
         // MARK: - Device emulation
         .target(
             name: "VortexDevices",
-            dependencies: ["VortexCore", "VortexHV", "VortexAudio"],
+            dependencies: ["VortexCore", "VortexHV", "VortexAudio", "VortexNetworking"],
             path: "Sources/VortexDevices",
             linkerSettings: [
                 .linkedFramework("vmnet"),
@@ -166,7 +174,7 @@ let package = Package(
         // MARK: - Virtualization.framework VM manager + vsock audio bridge
         .target(
             name: "VortexVZ",
-            dependencies: ["VortexCore", "VortexAudio", "VortexPersistence"],
+            dependencies: ["VortexCore", "VortexAudio", "VortexPersistence", "VortexNetworking"],
             path: "Sources/VortexVZ",
             linkerSettings: [
                 .linkedFramework("Virtualization"),
@@ -204,7 +212,7 @@ let package = Package(
         // MARK: - VM owner service and local control plane
         .target(
             name: "VortexService",
-            dependencies: ["VortexCore", "VortexAudio", "VortexPersistence", "VortexVZ", "VortexHV", "VortexLinux"],
+            dependencies: ["VortexCore", "VortexAudio", "VortexPersistence", "VortexVZ", "VortexHV", "VortexLinux", "VortexNetworking"],
             path: "Sources/VortexService",
             linkerSettings: [
                 .linkedFramework("Virtualization"),

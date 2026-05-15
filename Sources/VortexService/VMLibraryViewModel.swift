@@ -11,6 +11,7 @@ import Virtualization
 import VortexAudio
 import VortexCore
 import VortexLinux
+import VortexNetworking
 import VortexPersistence
 import VortexVZ
 
