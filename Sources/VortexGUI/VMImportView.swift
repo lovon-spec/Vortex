@@ -79,6 +79,8 @@ struct VMImportView: View {
 
     // MARK: - Constants
 
+    private static let lastImportDirectoryDefaultsKey = "VMImportView.lastImportDirectory"
+
     private var maxCPUCores: Int {
         HardwareProfile.maximumCPUCores
     }
@@ -532,6 +534,7 @@ struct VMImportView: View {
         let panel = NSOpenPanel()
         panel.title = "Select Disk Image"
         panel.message = "Choose a disk image file or UTM bundle to import."
+        panel.directoryURL = Self.defaultImportDirectoryURL()
         panel.allowedContentTypes = [.data, .package]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
@@ -540,6 +543,8 @@ struct VMImportView: View {
         guard panel.runModal() == .OK, let selectedURL = panel.url else {
             return
         }
+
+        Self.storeImportDirectory(for: selectedURL)
 
         let url: URL
         do {
@@ -564,6 +569,30 @@ struct VMImportView: View {
 
         // Auto-detect companion files.
         detectCompanionFiles(near: url)
+    }
+
+    private static func defaultImportDirectoryURL() -> URL? {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+        let candidates: [URL?] = [
+            UserDefaults.standard.string(forKey: lastImportDirectoryDefaultsKey).map {
+                URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath)
+            },
+            home.appendingPathComponent("Library/Containers/com.utmapp.UTM/Data/Documents"),
+            fm.urls(for: .documentDirectory, in: .userDomainMask).first,
+            home,
+        ]
+
+        return candidates.compactMap { $0 }.first { url in
+            var isDirectory: ObjCBool = false
+            return fm.fileExists(atPath: url.path, isDirectory: &isDirectory)
+                && isDirectory.boolValue
+        }
+    }
+
+    private static func storeImportDirectory(for selectedURL: URL) {
+        let directory = selectedURL.deletingLastPathComponent()
+        UserDefaults.standard.set(directory.path, forKey: lastImportDirectoryDefaultsKey)
     }
 
     private func resolveDiskImageSelection(_ url: URL) throws -> URL {
