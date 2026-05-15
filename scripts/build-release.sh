@@ -137,8 +137,9 @@ cat > "${APP_CONTENTS}/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Copy entitlements into bundle for reference.
-cp "${ENTITLEMENTS}" "${APP_CONTENTS}/Vortex.entitlements"
+# Copy entitlements into Resources for reference. Files directly under
+# Contents are treated as nested code by codesign.
+cp "${ENTITLEMENTS}" "${APP_RESOURCES}/Vortex.entitlements"
 
 codesign --sign "${SIGNING_ID}" --entitlements "${ENTITLEMENTS}" --force "${APP_BUNDLE}" 2>/dev/null
 echo "[signed] ${APP_BUNDLE}"
