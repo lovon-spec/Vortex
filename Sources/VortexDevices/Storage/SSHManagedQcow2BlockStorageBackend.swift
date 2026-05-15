@@ -174,18 +174,12 @@ public final class SSHQEMUNBDTunnel: @unchecked Sendable {
     }
 
     private func remoteCommand() -> String {
-        var qemuArgs = [
-            "-f", "qcow2",
-            "-t",
-            "--bind=127.0.0.1",
-            "-p", String(remotePort),
-            "-x", exportName,
-        ]
-        if readOnly {
-            qemuArgs.append("-r")
-        }
-        qemuArgs.append(resource.path)
-
+        let qemuArgs = Self.qemuNBDArguments(
+            remotePort: remotePort,
+            exportName: exportName,
+            readOnly: readOnly,
+            imagePath: resource.path
+        )
         let argv = qemuArgs.map(Self.shellQuote).joined(separator: " ")
         return """
         q="${VORTEX_QEMU_NBD:-}"; \
@@ -193,6 +187,25 @@ public final class SSHQEMUNBDTunnel: @unchecked Sendable {
         if [ -z "$q" ]; then echo "qemu-nbd not found" >&2; exit 127; fi; \
         exec "$q" \(argv)
         """
+    }
+
+    internal static func qemuNBDArguments(
+        remotePort: UInt16,
+        exportName: String,
+        readOnly: Bool,
+        imagePath: String
+    ) -> [String] {
+        var args = [
+            "-f", "qcow2",
+            "--bind=127.0.0.1",
+            "-p", String(remotePort),
+            "-x", exportName,
+        ]
+        if readOnly {
+            args.append("-r")
+        }
+        args.append(imagePath)
+        return args
     }
 
     private static func shellQuote(_ value: String) -> String {

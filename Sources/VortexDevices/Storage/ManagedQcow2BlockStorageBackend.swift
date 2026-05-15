@@ -98,17 +98,13 @@ public final class QEMUNBDServer: @unchecked Sendable {
         guard !started else { return }
 
         process.executableURL = URL(fileURLWithPath: qemuNBDPath)
-        var args = [
-            "-f", format,
-            "-t",
-            "-p", String(port),
-            "-x", exportName,
-        ]
-        if readOnly {
-            args.append("-r")
-        }
-        args.append(imagePath)
-        process.arguments = args
+        process.arguments = Self.qemuNBDArguments(
+            format: format,
+            port: port,
+            exportName: exportName,
+            readOnly: readOnly,
+            imagePath: imagePath
+        )
         process.standardError = stderrPipe
 
         do {
@@ -152,6 +148,26 @@ public final class QEMUNBDServer: @unchecked Sendable {
 
     deinit {
         stop()
+    }
+
+    internal static func qemuNBDArguments(
+        format: String,
+        port: UInt16,
+        exportName: String,
+        readOnly: Bool,
+        imagePath: String
+    ) -> [String] {
+        var args = [
+            "-f", format,
+            "--bind=127.0.0.1",
+            "-p", String(port),
+            "-x", exportName,
+        ]
+        if readOnly {
+            args.append("-r")
+        }
+        args.append(imagePath)
+        return args
     }
 
     // MARK: - Discovery
