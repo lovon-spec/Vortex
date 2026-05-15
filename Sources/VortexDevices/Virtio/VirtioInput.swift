@@ -52,17 +52,23 @@ private enum LinuxInput {
     static let evSyn: UInt16 = 0x00
     static let evKey: UInt16 = 0x01
     static let evAbs: UInt16 = 0x03
+    static let evLed: UInt16 = 0x11
+    static let evRep: UInt16 = 0x14
 
     static let synReport: UInt16 = 0x00
 
     static let absX: UInt16 = 0x00
     static let absY: UInt16 = 0x01
+    static let absMin: UInt32 = 0x0000
+    static let absMax: UInt32 = 0x7fff
 
     static let btnLeft: UInt16 = 0x110
     static let btnRight: UInt16 = 0x111
     static let btnMiddle: UInt16 = 0x112
 
-    static let inputPropDirect: UInt16 = 0x01
+    static let ledNumLock: UInt16 = 0x00
+    static let ledCapsLock: UInt16 = 0x01
+    static let ledScrollLock: UInt16 = 0x02
 }
 
 private struct VirtioInputEvent: Sendable {
@@ -119,13 +125,17 @@ public final class VirtioInputDevice: VirtioDeviceBase, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        switch offset {
-        case VirtioInputConfigOffset.select:
-            configSelect = UInt8(value & 0xff)
-        case VirtioInputConfigOffset.subsel:
-            configSubselect = UInt8(value & 0xff)
-        default:
-            break
+        for byteOffset in 0..<max(size, 0) {
+            let configOffset = offset + byteOffset
+            let byte = UInt8((value >> UInt32(byteOffset * 8)) & 0xff)
+            switch configOffset {
+            case VirtioInputConfigOffset.select:
+                configSelect = byte
+            case VirtioInputConfigOffset.subsel:
+                configSubselect = byte
+            default:
+                break
+            }
         }
     }
 
@@ -153,6 +163,9 @@ public final class VirtioInputDevice: VirtioDeviceBase, @unchecked Sendable {
     }
 
     public func sendKey(code: UInt16, pressed: Bool) {
+        guard status.contains(.driverOK) else {
+            return
+        }
         enqueue([
             VirtioInputEvent(type: LinuxInput.evKey, code: code, value: pressed ? 1 : 0),
             VirtioInputEvent(type: LinuxInput.evSyn, code: LinuxInput.synReport, value: 0),
@@ -163,17 +176,22 @@ public final class VirtioInputDevice: VirtioDeviceBase, @unchecked Sendable {
         guard case let .tablet(width, height) = profile else {
             return
         }
+        guard status.contains(.driverOK) else {
+            return
+        }
 
         let clampedX = min(x, max(width, 1) - 1)
         let clampedY = min(y, max(height, 1) - 1)
+        let absX = Self.scaleToAbsoluteTabletRange(clampedX, extent: width)
+        let absY = Self.scaleToAbsoluteTabletRange(clampedY, extent: height)
 
         lock.lock()
         let changedButtons = pointerButtons.symmetricDifference(buttons)
         pointerButtons = buttons
 
         var events = [
-            VirtioInputEvent(type: LinuxInput.evAbs, code: LinuxInput.absX, value: Int32(clampedX)),
-            VirtioInputEvent(type: LinuxInput.evAbs, code: LinuxInput.absY, value: Int32(clampedY)),
+            VirtioInputEvent(type: LinuxInput.evAbs, code: LinuxInput.absX, value: Int32(absX)),
+            VirtioInputEvent(type: LinuxInput.evAbs, code: LinuxInput.absY, value: Int32(absY)),
         ]
 
         appendButtonEvents(
@@ -262,8 +280,7 @@ public final class VirtioInputDevice: VirtioDeviceBase, @unchecked Sendable {
             writePropertyBits(into: &payload)
             payloadSize = trimmedPayloadSize(payload)
         case VirtioInputConfigSelect.evBits:
-            writeEventBits(subselect: UInt16(configSubselect), into: &payload)
-            payloadSize = trimmedPayloadSize(payload)
+            payloadSize = writeEventBits(subselect: UInt16(configSubselect), into: &payload)
         case VirtioInputConfigSelect.absInfo:
             payloadSize = writeAbsInfo(subselect: UInt16(configSubselect), into: &payload)
         default:
@@ -283,9 +300,9 @@ public final class VirtioInputDevice: VirtioDeviceBase, @unchecked Sendable {
     private var deviceName: String {
         switch profile {
         case .keyboard:
-            return "Vortex VirtIO Keyboard"
+            return "QEMU Virtio Keyboard"
         case .tablet:
-            return "Vortex VirtIO Tablet"
+            return "QEMU Virtio Tablet"
         }
     }
 
@@ -300,30 +317,32 @@ public final class VirtioInputDevice: VirtioDeviceBase, @unchecked Sendable {
 
     private func writeDeviceIDs(into payload: inout [UInt8]) {
         writeLE(LinuxInput.busVirtual, into: &payload, at: 0)
-        writeLE(UInt16(0x1af4), into: &payload, at: 2)
+        writeLE(UInt16(0x0627), into: &payload, at: 2)
         switch profile {
         case .keyboard:
             writeLE(UInt16(0x0001), into: &payload, at: 4)
         case .tablet:
-            writeLE(UInt16(0x0002), into: &payload, at: 4)
+            writeLE(UInt16(0x0003), into: &payload, at: 4)
         }
         writeLE(UInt16(0x0001), into: &payload, at: 6)
     }
 
     private func writePropertyBits(into payload: inout [UInt8]) {
-        guard case .tablet = profile else {
-            return
-        }
-        setBit(LinuxInput.inputPropDirect, in: &payload)
+        // QEMU's virtio-tablet does not advertise INPUT_PROP_DIRECT. Desktop
+        // pointer stacks treat it as an indirect absolute pointer, not a touch
+        // panel, which keeps mouse movement and clicks routed to the cursor.
     }
 
-    private func writeEventBits(subselect: UInt16, into payload: inout [UInt8]) {
+    private func writeEventBits(subselect: UInt16, into payload: inout [UInt8]) -> UInt8 {
         switch subselect {
         case 0:
             setBit(LinuxInput.evSyn, in: &payload)
             setBit(LinuxInput.evKey, in: &payload)
             if case .tablet = profile {
                 setBit(LinuxInput.evAbs, in: &payload)
+            } else {
+                setBit(LinuxInput.evLed, in: &payload)
+                setBit(LinuxInput.evRep, in: &payload)
             }
         case LinuxInput.evKey:
             switch profile {
@@ -336,28 +355,41 @@ public final class VirtioInputDevice: VirtioDeviceBase, @unchecked Sendable {
                 setBit(LinuxInput.btnRight, in: &payload)
                 setBit(LinuxInput.btnMiddle, in: &payload)
             }
+        case LinuxInput.evLed:
+            guard case .keyboard = profile else {
+                return 0
+            }
+            setBit(LinuxInput.ledNumLock, in: &payload)
+            setBit(LinuxInput.ledCapsLock, in: &payload)
+            setBit(LinuxInput.ledScrollLock, in: &payload)
+        case LinuxInput.evRep:
+            guard case .keyboard = profile else {
+                return 0
+            }
+            return 1
         case LinuxInput.evAbs:
             guard case .tablet = profile else {
-                return
+                return 0
             }
             setBit(LinuxInput.absX, in: &payload)
             setBit(LinuxInput.absY, in: &payload)
         default:
             break
         }
+        return trimmedPayloadSize(payload)
     }
 
     private func writeAbsInfo(subselect: UInt16, into payload: inout [UInt8]) -> UInt8 {
-        guard case let .tablet(width, height) = profile else {
+        guard case .tablet = profile else {
             return 0
         }
 
         switch subselect {
         case LinuxInput.absX:
-            writeAbsInfo(min: 0, max: max(width, 1) - 1, into: &payload)
+            writeAbsInfo(min: LinuxInput.absMin, max: LinuxInput.absMax, into: &payload)
             return 20
         case LinuxInput.absY:
-            writeAbsInfo(min: 0, max: max(height, 1) - 1, into: &payload)
+            writeAbsInfo(min: LinuxInput.absMin, max: LinuxInput.absMax, into: &payload)
             return 20
         default:
             return 0
@@ -407,6 +439,15 @@ public final class VirtioInputDevice: VirtioDeviceBase, @unchecked Sendable {
         payload[offset + 1] = UInt8((value >> 8) & 0xff)
         payload[offset + 2] = UInt8((value >> 16) & 0xff)
         payload[offset + 3] = UInt8((value >> 24) & 0xff)
+    }
+
+    private static func scaleToAbsoluteTabletRange(_ value: UInt32, extent: UInt32) -> UInt32 {
+        guard extent > 1 else {
+            return LinuxInput.absMin
+        }
+        let range = UInt64(LinuxInput.absMax - LinuxInput.absMin)
+        let scaled = UInt64(value) * range / UInt64(extent - 1)
+        return LinuxInput.absMin + UInt32(scaled)
     }
 }
 

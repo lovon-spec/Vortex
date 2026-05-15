@@ -285,7 +285,7 @@ private final class NativeLinuxFramebufferNSView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.acceptsMouseMovedEvents = true
-        window?.makeFirstResponder(self)
+        claimInputFocusSoon()
     }
 
     override func resignFirstResponder() -> Bool {
@@ -303,7 +303,7 @@ private final class NativeLinuxFramebufferNSView: NSView {
         }
         let area = NSTrackingArea(
             rect: .zero,
-            options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved, .mouseEnteredAndExited],
+            options: [.activeAlways, .inVisibleRect, .mouseMoved, .mouseEnteredAndExited],
             owner: self,
             userInfo: nil
         )
@@ -321,16 +321,24 @@ private final class NativeLinuxFramebufferNSView: NSView {
         }
 
         let rect = imageRect(for: image)
-        NSImage(cgImage: image, size: rect.size).draw(
+        let nsImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        nsImage.draw(
             in: rect,
-            from: NSRect(origin: .zero, size: rect.size),
+            from: NSRect(origin: .zero, size: nsImage.size),
             operation: .copy,
-            fraction: 1.0
+            fraction: 1.0,
+            respectFlipped: true,
+            hints: [.interpolation: NSImageInterpolation.none]
         )
     }
 
+    override func mouseEntered(with event: NSEvent) {
+        claimInputFocus()
+        sendPointerEvent(event)
+    }
+
     override func mouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
+        claimInputFocus()
         sendPointerEvent(event)
     }
 
@@ -347,7 +355,7 @@ private final class NativeLinuxFramebufferNSView: NSView {
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
+        claimInputFocus()
         sendPointerEvent(event)
     }
 
@@ -360,7 +368,7 @@ private final class NativeLinuxFramebufferNSView: NSView {
     }
 
     override func otherMouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
+        claimInputFocus()
         sendPointerEvent(event)
     }
 
@@ -436,6 +444,19 @@ private final class NativeLinuxFramebufferNSView: NSView {
         }
         pressedLinuxKeys.removeAll()
         modifierStates.removeAll()
+    }
+
+    private func claimInputFocusSoon() {
+        DispatchQueue.main.async { [weak self] in
+            self?.claimInputFocus()
+        }
+    }
+
+    private func claimInputFocus() {
+        guard let window, window.firstResponder !== self else {
+            return
+        }
+        window.makeFirstResponder(self)
     }
 
     private func framebufferPoint(for event: NSEvent, image: CGImage) -> (x: UInt32, y: UInt32)? {
