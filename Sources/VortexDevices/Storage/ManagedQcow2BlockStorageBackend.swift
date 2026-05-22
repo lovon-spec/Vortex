@@ -183,7 +183,8 @@ public final class QEMUNBDServer: @unchecked Sendable {
             "/Applications/UTM.app/Contents/Resources/qemu/qemu-nbd",
         ].compactMap { $0 }
 
-        for candidate in candidates where fileManager.isExecutableFile(atPath: candidate) {
+        for candidate in candidates
+        where fileManager.isExecutableFile(atPath: candidate) && isSafeToExecute(candidate) {
             return candidate
         }
 
@@ -192,13 +193,56 @@ public final class QEMUNBDServer: @unchecked Sendable {
             for case let relativePath as String in enumerator {
                 guard (relativePath as NSString).lastPathComponent == "qemu-nbd" else { continue }
                 let candidate = (utmResources as NSString).appendingPathComponent(relativePath)
-                if fileManager.isExecutableFile(atPath: candidate) {
+                if fileManager.isExecutableFile(atPath: candidate) && isSafeToExecute(candidate) {
                     return candidate
                 }
             }
         }
 
         throw BlockStorageError.executableNotFound("qemu-nbd")
+    }
+
+    /// Rejects a `qemu-nbd` candidate that any local user could replace.
+    ///
+    /// `qemu-nbd` is spawned with this process's privileges and is handed
+    /// user-supplied disk images, so a hostile substitute is a host
+    /// compromise. We refuse a candidate when the binary itself is
+    /// world-writable, or when its containing directory is world-writable
+    /// without the sticky bit (a non-sticky world-writable directory lets
+    /// any user rename/replace the binary regardless of its own mode). This
+    /// is the realistic exposure on Intel Macs, where `/usr/local/bin`
+    /// defaults to world-writable.
+    private static func isSafeToExecute(_ path: String) -> Bool {
+        let fileManager = FileManager.default
+
+        func isWorldWritable(_ p: String) -> Bool? {
+            guard let attrs = try? fileManager.attributesOfItem(atPath: p),
+                  let mode = (attrs[.posixPermissions] as? NSNumber)?.uint16Value else {
+                return nil
+            }
+            return (mode & 0o002) != 0
+        }
+
+        func isStickyDir(_ p: String) -> Bool {
+            guard let attrs = try? fileManager.attributesOfItem(atPath: p),
+                  let mode = (attrs[.posixPermissions] as? NSNumber)?.uint16Value else {
+                return false
+            }
+            return (mode & 0o1000) != 0
+        }
+
+        // The binary must not be world-writable. Treat an unreadable mode as
+        // unsafe rather than guessing.
+        guard let fileWW = isWorldWritable(path), fileWW == false else {
+            return false
+        }
+
+        let parent = (path as NSString).deletingLastPathComponent
+        if let parentWW = isWorldWritable(parent), parentWW, !isStickyDir(parent) {
+            return false
+        }
+
+        return true
     }
 
     private static func allocateLocalPort() throws -> UInt16 {

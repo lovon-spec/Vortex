@@ -14,7 +14,13 @@
 #   SIGNING_ID="Developer ID Application: ..." bash scripts/build-release.sh
 #
 # Environment:
-#   SIGNING_ID   Code signing identity (default: ad-hoc "-")
+#   SIGNING_ID      Code signing identity (default: ad-hoc "-"). When not
+#                   "-", the DMG is codesigned in addition to the .app.
+#   PKG_SIGNING_ID  Developer ID Installer identity for the guest tools
+#                   .pkg (passed through to GuestTools/build-pkg.sh).
+#                   Unset => unsigned package.
+#   NOTARY_PROFILE  notarytool keychain-profile name. When set (and
+#                   SIGNING_ID != "-"), the DMG is notarized and stapled.
 
 set -euo pipefail
 
@@ -151,7 +157,7 @@ echo "[signed] ${APP_BUNDLE}"
 
 log "Step 4/6: Building guest tools package"
 
-cd "${GUEST_DIR}" && bash build-pkg.sh
+cd "${GUEST_DIR}" && PKG_SIGNING_ID="${PKG_SIGNING_ID:-}" bash build-pkg.sh
 cd "${ROOT_DIR}"
 
 GUEST_PKG="${GUEST_DIR}/build/VortexGuestTools.pkg"
@@ -189,6 +195,30 @@ hdiutil create \
 rm -rf "${DMG_STAGING}"
 
 echo "DMG created: ${DMG_PATH}"
+
+# Sign and (optionally) notarize the DMG. The inner .app is always signed
+# above; this signs the disk-image wrapper so it carries a trust chain when
+# redistributed. Skipped for the ad-hoc default identity ("-").
+if [ "${SIGNING_ID}" != "-" ]; then
+    codesign --sign "${SIGNING_ID}" --force --timestamp "${DMG_PATH}"
+    echo "[signed] ${DMG_PATH}"
+
+    # Notarize when a stored notarytool keychain profile is provided
+    # (created via: xcrun notarytool store-credentials). Without it we
+    # skip notarization rather than fail the build.
+    if [ -n "${NOTARY_PROFILE:-}" ]; then
+        log "Notarizing ${DMG_NAME} (profile: ${NOTARY_PROFILE})"
+        xcrun notarytool submit "${DMG_PATH}" \
+            --keychain-profile "${NOTARY_PROFILE}" \
+            --wait
+        xcrun stapler staple "${DMG_PATH}"
+        echo "[notarized] ${DMG_PATH}"
+    else
+        echo "NOTARY_PROFILE not set -- skipping notarization."
+    fi
+else
+    echo "SIGNING_ID is ad-hoc -- skipping DMG signing and notarization."
+fi
 
 # ============================================================
 # Step 6: Checksums

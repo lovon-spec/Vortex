@@ -7,6 +7,7 @@
 // components (kernel cache, device tree, firmware blobs, disk images).
 
 import Foundation
+import Virtualization
 import VortexCore
 
 // MARK: - IPSW Contents
@@ -140,6 +141,7 @@ public final class IPSWExtractor: @unchecked Sendable {
 
         // Skip download if the file already exists at the destination.
         if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try await validateRestoreImage(at: destinationURL)
             progress(1.0)
             return destinationURL
         }
@@ -166,6 +168,8 @@ public final class IPSWExtractor: @unchecked Sendable {
 
         // Move the downloaded file to the destination.
         try FileManager.default.moveItem(at: temporaryURL, to: destinationURL)
+
+        try await validateRestoreImage(at: destinationURL)
 
         progress(1.0)
         return destinationURL
@@ -195,6 +199,7 @@ public final class IPSWExtractor: @unchecked Sendable {
         let destinationURL = directory.appendingPathComponent(filename)
 
         if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try await validateRestoreImage(at: destinationURL)
             progress(1.0)
             return destinationURL
         }
@@ -218,6 +223,7 @@ public final class IPSWExtractor: @unchecked Sendable {
         }
 
         try FileManager.default.moveItem(at: temporaryURL, to: destinationURL)
+        try await validateRestoreImage(at: destinationURL)
         progress(1.0)
         return destinationURL
     }
@@ -421,12 +427,81 @@ public final class IPSWExtractor: @unchecked Sendable {
         // Each entry has keys like "FirmwareURL" or similar.
         // Extract the first available IPSW URL for Apple Silicon (arm64e).
         if let ipswURL = extractIPSWDownloadURL(from: plist) {
-            return ipswURL
+            // The catalog is fetched over TLS from Apple, but its contents are
+            // attacker-influenced if that channel or the catalog itself is
+            // compromised. Refuse to download from anything that is not an
+            // Apple-controlled https host before handing the URL to the
+            // downloader.
+            return try validatedAppleDownloadURL(ipswURL)
         }
 
         throw VortexError.bootFailed(
             reason: "No compatible Apple Silicon IPSW found in catalog"
         )
+    }
+
+    /// Hosts Apple uses to serve restore images and software catalogs.
+    ///
+    /// IPSW payloads are served from both `*.apple.com` (e.g.
+    /// `mesu.apple.com`, `appldnld.apple.com`) and Apple's CDN
+    /// (`*.cdn-apple.com`, e.g. `updates.cdn-apple.com`).
+    private static func isApprovedAppleHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        return h == "apple.com"
+            || h.hasSuffix(".apple.com")
+            || h.hasSuffix(".cdn-apple.com")
+    }
+
+    /// Validates that a catalog-derived download URL points at an
+    /// Apple-controlled https host.
+    ///
+    /// - Throws: `VortexError.bootFailed` if the scheme is not https or the
+    ///   host is not an approved Apple host.
+    private static func validatedAppleDownloadURL(_ url: URL) throws -> URL {
+        guard url.scheme?.lowercased() == "https" else {
+            throw VortexError.bootFailed(
+                reason: "Refusing IPSW download over non-https URL: \(url.absoluteString)"
+            )
+        }
+        guard let host = url.host, isApprovedAppleHost(host) else {
+            throw VortexError.bootFailed(
+                reason: "Refusing IPSW download from non-Apple host: \(url.host ?? "<none>")"
+            )
+        }
+        return url
+    }
+
+    /// Validates an on-disk IPSW by loading it through
+    /// `VZMacOSRestoreImage.load(from:)`.
+    ///
+    /// This is defense-in-depth on top of the host allowlist: Apple's
+    /// framework parses and rejects a file that is not a well-formed macOS
+    /// restore image, so a truncated, corrupt, or substituted download fails
+    /// here before it is ever extracted and booted. Note that full
+    /// cryptographic signature enforcement happens at install time inside
+    /// `VZMacOSInstaller`; the Hypervisor.framework boot path has no
+    /// equivalent, so this validation plus the Apple-host allowlist is the
+    /// available verification for that path.
+    ///
+    /// - Throws: `VortexError.invalidRestoreImage` if the file cannot be
+    ///   loaded as a macOS restore image.
+    private static func validateRestoreImage(at url: URL) async throws {
+        _ = try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<VZMacOSRestoreImage, Error>) in
+            VZMacOSRestoreImage.load(from: url) { result in
+                switch result {
+                case .success(let image):
+                    continuation.resume(returning: image)
+                case .failure(let error):
+                    continuation.resume(
+                        throwing: VortexError.invalidRestoreImage(
+                            path: url.path,
+                            reason: "restore image validation failed: \(error.localizedDescription)"
+                        )
+                    )
+                }
+            }
+        }
     }
 
     /// Parses the catalog plist to find an IPSW download URL.

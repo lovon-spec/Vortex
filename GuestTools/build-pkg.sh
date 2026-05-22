@@ -6,7 +6,7 @@
 # installs:
 #
 #   /Library/Audio/Plug-Ins/HAL/VortexAudioPlugin.driver   (HAL plugin)
-#   /usr/local/bin/VortexAudioDaemon                        (vsock daemon)
+#   /usr/local/libexec/vortex/VortexAudioDaemon             (vsock daemon)
 #   /Library/LaunchDaemons/com.vortex.audiodaemon.plist     (auto-start)
 #
 # A postinstall script restarts coreaudiod and loads the LaunchDaemon.
@@ -89,15 +89,18 @@ log "Creating staging directory..."
 
 rm -rf "${STAGING_DIR}"
 mkdir -p "${STAGING_DIR}/Library/Audio/Plug-Ins/HAL"
-mkdir -p "${STAGING_DIR}/usr/local/bin"
+mkdir -p "${STAGING_DIR}/usr/local/libexec/vortex"
 mkdir -p "${STAGING_DIR}/Library/LaunchDaemons"
 
 # Copy the plugin bundle (preserve structure).
 cp -R "${PLUGIN_BUNDLE}" "${STAGING_DIR}/Library/Audio/Plug-Ins/HAL/"
 
-# Copy the daemon binary.
-cp "${DAEMON_BINARY}" "${STAGING_DIR}/usr/local/bin/VortexAudioDaemon"
-chmod 755 "${STAGING_DIR}/usr/local/bin/VortexAudioDaemon"
+# Copy the daemon binary. It is installed under libexec rather than
+# /usr/local/bin so it does not sit in a directory that is world-writable
+# by default on Intel macOS; the postinstall script additionally enforces
+# root:wheel ownership and 0755 mode.
+cp "${DAEMON_BINARY}" "${STAGING_DIR}/usr/local/libexec/vortex/VortexAudioDaemon"
+chmod 755 "${STAGING_DIR}/usr/local/libexec/vortex/VortexAudioDaemon"
 
 # Copy the LaunchDaemon plist.
 cp "${SCRIPT_DIR}/VortexAudioDaemon/com.vortex.audiodaemon.plist" \
@@ -111,7 +114,7 @@ chmod 644 "${STAGING_DIR}/usr/local/share/vortex/VERSION"
 
 log "  Staging layout:"
 log "    Library/Audio/Plug-Ins/HAL/VortexAudioPlugin.driver/"
-log "    usr/local/bin/VortexAudioDaemon"
+log "    usr/local/libexec/vortex/VortexAudioDaemon"
 log "    Library/LaunchDaemons/com.vortex.audiodaemon.plist"
 log "    usr/local/share/vortex/VERSION (${PKG_VERSION})"
 
@@ -131,12 +134,25 @@ log "Building package..."
 # Remove any previous package.
 rm -f "${PKG_PATH}"
 
+# Sign the package when a Developer ID Installer identity is provided via
+# PKG_SIGNING_ID. Unsigned (the default) keeps local dev/CI working without
+# an Apple Developer account; signing is required for the guest installer
+# to accept the package without a Gatekeeper override.
+PKG_SIGN_ARGS=()
+if [[ -n "${PKG_SIGNING_ID:-}" ]]; then
+    PKG_SIGN_ARGS=(--sign "${PKG_SIGNING_ID}")
+    log "Signing package with identity: ${PKG_SIGNING_ID}"
+else
+    log "PKG_SIGNING_ID not set -- building unsigned package."
+fi
+
 pkgbuild \
     --root "${STAGING_DIR}" \
     --identifier "${PKG_ID}" \
     --version "${PKG_VERSION}" \
     --install-location / \
     --scripts "${SCRIPTS_DIR}" \
+    "${PKG_SIGN_ARGS[@]}" \
     "${PKG_PATH}"
 
 [ -f "${PKG_PATH}" ] || die "pkgbuild failed: ${PKG_PATH} not created"

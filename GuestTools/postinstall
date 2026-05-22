@@ -21,6 +21,9 @@ set -u
 PLIST="/Library/LaunchDaemons/com.vortex.audiodaemon.plist"
 DAEMON_LABEL="com.vortex.audiodaemon"
 INSTALLED_VERSION_FILE="/usr/local/share/vortex/VERSION"
+DAEMON_DIR="/usr/local/libexec/vortex"
+DAEMON_BIN="${DAEMON_DIR}/VortexAudioDaemon"
+LEGACY_DAEMON_BIN="/usr/local/bin/VortexAudioDaemon"
 
 # -- Version check --
 # If the installed version matches the package version, skip the
@@ -53,6 +56,12 @@ killall VortexAudioDaemon 2>/dev/null || true
 # Unload the LaunchDaemon so launchd doesn't restart it.
 launchctl bootout system/"${DAEMON_LABEL}" 2>/dev/null || true
 
+# Remove the daemon binary left by pre-libexec installs. /usr/local/bin is
+# world-writable by default on Intel macOS, so a stale copy there is a
+# standing privilege-escalation foothold even though the LaunchDaemon now
+# runs the libexec copy.
+rm -f "${LEGACY_DAEMON_BIN}" 2>/dev/null || true
+
 # Give the daemon a moment to release shm.
 sleep 1
 
@@ -71,6 +80,23 @@ fi
 
 # Give coreaudiod a moment to start and load the plugin.
 sleep 2
+
+# -- Step 2.5: Harden daemon binary ownership and permissions --
+# The LaunchDaemon runs this binary as root. pkgbuild payloads install as
+# root:wheel already, but enforce it explicitly so the binary and its
+# directory cannot be replaced by a non-root user regardless of how the
+# payload was applied.
+echo "VortexGuestTools postinstall: securing daemon binary..."
+if [[ -d "${DAEMON_DIR}" ]]; then
+    chown root:wheel "${DAEMON_DIR}" 2>/dev/null || true
+    chmod 755 "${DAEMON_DIR}" 2>/dev/null || true
+fi
+if [[ -f "${DAEMON_BIN}" ]]; then
+    chown root:wheel "${DAEMON_BIN}" 2>/dev/null || true
+    chmod 755 "${DAEMON_BIN}" 2>/dev/null || true
+else
+    echo "  WARNING: ${DAEMON_BIN} not found after install."
+fi
 
 # -- Step 3: Load the new daemon --
 echo "VortexGuestTools postinstall: loading new LaunchDaemon..."

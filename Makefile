@@ -13,10 +13,16 @@
 # Configuration:
 #   CONFIGURATION   debug or release (default: debug, except for 'release'/'app'/'dmg')
 #   SIGNING_ID      Code signing identity (default: ad-hoc "-")
+#   NOTARY_PROFILE  notarytool keychain profile; if set, 'dmg' notarizes
+#                   and staples the signed DMG (requires SIGNING_ID != "-")
+#   PKG_SIGNING_ID  Developer ID Installer identity for guest-tools .pkg
+#                   (default: unset => unsigned package)
 
 SHELL          := /bin/bash
 CONFIGURATION  ?= debug
 SIGNING_ID     ?= -
+NOTARY_PROFILE ?=
+PKG_SIGNING_ID ?=
 
 # -- Derived paths --
 ROOT_DIR       := $(shell pwd)
@@ -77,7 +83,7 @@ sign:
 # ============================================================
 
 guest-tools:
-	cd "$(GUEST_DIR)" && bash build-pkg.sh
+	cd "$(GUEST_DIR)" && PKG_SIGNING_ID="$(PKG_SIGNING_ID)" bash build-pkg.sh
 
 # ============================================================
 # App bundle (always release)
@@ -150,6 +156,19 @@ dmg: app guest-tools
 		-format UDZO \
 		"$(DMG_PATH)"
 	@rm -rf "$(DMG_STAGING)"
+	@if [ "$(SIGNING_ID)" != "-" ]; then \
+		codesign --sign "$(SIGNING_ID)" --force --timestamp "$(DMG_PATH)"; \
+		echo "[signed] $(DMG_PATH)"; \
+		if [ -n "$(NOTARY_PROFILE)" ]; then \
+			xcrun notarytool submit "$(DMG_PATH)" --keychain-profile "$(NOTARY_PROFILE)" --wait && \
+			xcrun stapler staple "$(DMG_PATH)" && \
+			echo "[notarized] $(DMG_PATH)"; \
+		else \
+			echo "NOTARY_PROFILE not set -- skipping notarization."; \
+		fi; \
+	else \
+		echo "SIGNING_ID is ad-hoc -- skipping DMG signing and notarization."; \
+	fi
 	@echo "==> $(DMG_PATH)"
 	@shasum -a 256 "$(DMG_PATH)"
 

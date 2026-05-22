@@ -141,7 +141,14 @@ let package = Package(
         .target(
             name: "VortexBoot",
             dependencies: ["VortexCore", "VortexHV"],
-            path: "Sources/VortexBoot"
+            path: "Sources/VortexBoot",
+            linkerSettings: [
+                // Used only to validate downloaded macOS restore images via
+                // VZMacOSRestoreImage.load(from:) before extraction. This
+                // API is macOS 12+ and present in the public macOS 15 SDK,
+                // so VortexBoot stays SDK-neutral for hosted CI.
+                .linkedFramework("Virtualization"),
+            ]
         ),
 
         // MARK: - Persistence

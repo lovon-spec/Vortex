@@ -6,7 +6,7 @@
 #
 # Both are installed inside the macOS guest VM:
 #   - Plugin: /Library/Audio/Plug-Ins/HAL/VortexAudioPlugin.driver
-#   - Daemon: /usr/local/bin/VortexAudioDaemon
+#   - Daemon: /usr/local/libexec/vortex/VortexAudioDaemon
 #   - Plist:  /Library/LaunchDaemons/com.vortex.audiodaemon.plist
 #
 # Usage:
@@ -102,7 +102,8 @@ install: all
 	sudo cp -R $(PLUGIN_BUNDLE) /Library/Audio/Plug-Ins/HAL/
 	@echo ""
 	@echo "Installing VortexAudioDaemon..."
-	sudo install -m 755 $(DAEMON_BINARY) /usr/local/bin/VortexAudioDaemon
+	sudo install -d -o root -g wheel -m 755 /usr/local/libexec/vortex
+	sudo install -o root -g wheel -m 755 $(DAEMON_BINARY) /usr/local/libexec/vortex/VortexAudioDaemon
 	@echo ""
 	@echo "Installing LaunchDaemon plist..."
 	sudo cp $(DAEMON_PLIST) /Library/LaunchDaemons/com.vortex.audiodaemon.plist
@@ -120,7 +121,8 @@ uninstall:
 	@echo "=== Uninstalling GuestTools ==="
 	sudo launchctl unload /Library/LaunchDaemons/com.vortex.audiodaemon.plist 2>/dev/null || true
 	sudo rm -f /Library/LaunchDaemons/com.vortex.audiodaemon.plist
-	sudo rm -f /usr/local/bin/VortexAudioDaemon
+	sudo rm -f /usr/local/libexec/vortex/VortexAudioDaemon
+	sudo rmdir /usr/local/libexec/vortex 2>/dev/null || true
 	sudo rm -rf /Library/Audio/Plug-Ins/HAL/VortexAudioPlugin.driver
 	sudo launchctl kickstart -kp system/com.apple.audio.coreaudiod
 	@echo "Done."
