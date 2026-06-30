@@ -36,6 +36,15 @@ public final class VZVMManager: NSObject {
     /// File manager for resolving VM bundle paths.
     private let fileManager: VMFileManager
 
+    /// Time to allow a cooperative guest shutdown before killing the VM.
+    private static let gracefulStopTimeoutSeconds = 30
+
+    /// Time to wait for VZ state to settle after a forced stop completes.
+    private static let forcedStopSettleTimeoutSeconds = 5
+
+    /// Poll interval while waiting for VZ to report a terminal state.
+    private static let stopPollInterval: Duration = .milliseconds(200)
+
     /// Tracks the most recent delegate-reported state per VM.
     /// Keyed by the ObjectIdentifier of the VZVirtualMachine.
     private var stateObservers: [ObjectIdentifier: VZVMStateObserver] = [:]
@@ -335,27 +344,42 @@ public final class VZVMManager: NSObject {
         }
     }
 
-    /// Requests the VM to stop gracefully.
+    /// Stops the VM, preferring graceful guest shutdown.
     ///
     /// Sends an ACPI shutdown request to the guest. The guest OS should
-    /// handle this as a power-off event and shut down cleanly.
+    /// handle this as a power-off event and shut down cleanly. If the guest
+    /// does not reach VZ's stopped state before the timeout, the VM is
+    /// force-stopped so the VZ child process and disk locks are released.
     ///
     /// - Parameter vm: The virtual machine to stop.
     /// - Throws: `VortexError.vmStopTimeout` or `VortexError.internalError`
-    ///   if the request fails.
+    ///   if the VM cannot be stopped.
     public func stop(_ vm: VZVirtualMachine) async throws {
-        guard vm.canRequestStop else {
-            // Fall back to force stop if graceful is not available.
-            try await forceStop(vm)
+        if vm.state == .stopped {
             return
         }
 
-        do {
-            try vm.requestStop()
-        } catch {
-            throw VortexError.internalError(
-                reason: "Failed to request VM stop: \(error.localizedDescription)"
-            )
+        if vm.canRequestStop {
+            do {
+                try vm.requestStop()
+            } catch {
+                throw VortexError.internalError(
+                    reason: "Failed to request VM stop: \(error.localizedDescription)"
+                )
+            }
+
+            if await waitUntilStopped(vm, timeoutSeconds: Self.gracefulStopTimeoutSeconds) {
+                return
+            }
+        }
+
+        guard vm.canStop else {
+            throw stopTimeoutError(for: vm, timeoutSeconds: Self.gracefulStopTimeoutSeconds)
+        }
+
+        try await forceStop(vm)
+        guard await waitUntilStopped(vm, timeoutSeconds: Self.forcedStopSettleTimeoutSeconds) else {
+            throw stopTimeoutError(for: vm, timeoutSeconds: Self.forcedStopSettleTimeoutSeconds)
         }
     }
 
@@ -371,6 +395,36 @@ public final class VZVMManager: NSObject {
         }
 
         try await vm.stop()
+    }
+
+    private func waitUntilStopped(
+        _ vm: VZVirtualMachine,
+        timeoutSeconds: Int
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
+
+        while vm.state != .stopped && Date() < deadline {
+            do {
+                try await Task.sleep(for: Self.stopPollInterval)
+            } catch {
+                break
+            }
+        }
+
+        return vm.state == .stopped
+    }
+
+    private func stopTimeoutError(
+        for vm: VZVirtualMachine,
+        timeoutSeconds: Int
+    ) -> VortexError {
+        if let vmID = stateObservers[ObjectIdentifier(vm)]?.vmID {
+            return .vmStopTimeout(id: vmID, timeoutSeconds: timeoutSeconds)
+        }
+
+        return .internalError(
+            reason: "VM did not stop within \(timeoutSeconds) seconds (current: \(vm.state.displayName))."
+        )
     }
 
     /// Pauses VM execution, freezing all vCPUs.
